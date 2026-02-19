@@ -1,0 +1,11 @@
+ [server]
+ headless = true
+ 
+ [browser]
+ gatherUsageStats = false
+ 
+ [global]
+ showWarningOnDirectExecution = false
+ 
+ [client]
+ showErrorDetails = "full"

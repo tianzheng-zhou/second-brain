@@ -97,3 +97,23 @@ pb ingest [path]           # 处理inbox或指定文件
 pb search "query"          # 语义搜索
 pb cleanup [--dry-run]     # 运行垃圾清理
 ```
+
+## 6. 图形化界面 (GUI)
+
+本项目提供了一个基于 Streamlit 的图形化界面，方便用户更直观地管理和搜索内容。
+
+### 启动 GUI
+
+在项目根目录下运行以下命令：
+
+```bash
+streamlit run streamlit_app.py
+```
+
+或者直接双击运行 `run_gui.bat` (Windows)。
+
+GUI 包含以下功能模块：
+- **Search**: 语义搜索界面，支持结果预览。
+- **Ingest**: 文件导入工具，支持路径导入和直接上传文件。
+- **Manage**: 数据库初始化与重置管理。
+

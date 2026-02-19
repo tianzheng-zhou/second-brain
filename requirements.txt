@@ -8,3 +8,4 @@ python-magic; sys_platform != 'win32'
 requests
 tqdm
 tenacity
+streamlit
