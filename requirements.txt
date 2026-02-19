@@ -12,3 +12,4 @@ streamlit
 mcp
 python-dotenv
 dashscope
+uvicorn

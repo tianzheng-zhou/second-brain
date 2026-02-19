@@ -1,5 +1,6 @@
 import asyncio
 import os
+import argparse
 from mcp.server.fastmcp import FastMCP
 from personal_brain.core.search import search_files
 from personal_brain.core.ingestion import ingest_path
@@ -78,4 +79,16 @@ async def ingest_content(path: str) -> str:
         return f"Error ingesting content: {e}"
 
 if __name__ == "__main__":
-    mcp.run()
+    parser = argparse.ArgumentParser(description="PersonalBrain MCP Server")
+    parser.add_argument("--transport", default="stdio", choices=["stdio", "sse"], help="Transport protocol to use (default: stdio)")
+    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to (SSE only)")
+    parser.add_argument("--port", type=int, default=8000, help="Port to bind to (SSE only)")
+    args = parser.parse_args()
+
+    if args.transport == "sse":
+        print(f"Starting MCP server on http://{args.host}:{args.port}/sse", flush=True)
+        mcp.settings.host = args.host
+        mcp.settings.port = args.port
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")

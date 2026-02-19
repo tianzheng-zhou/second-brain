@@ -119,14 +119,49 @@ streamlit run streamlit_app.py
 
 ## 7. Model Context Protocol (MCP) 服务器
 
-PersonalBrain 支持 MCP 协议，可以作为工具被 Claude Desktop、Trae 或其他支持 MCP 的客户端集成。
+PersonalBrain 支持 MCP 协议，可以作为工具被 Claude Desktop、Cherry Studio、Trae 或其他支持 MCP 的客户端集成。
 
 ### 功能
 - `search_notes`: 搜索笔记。
 - `ask_brain_agent`: 基于 RAG 回答问题。
 - `ingest_content`: 导入新内容。
 
-### 配置 MCP (以 Claude Desktop 为例)
+### 连接方式
+
+PersonalBrain MCP 服务器支持两种连接方式：
+
+1.  **SSE (Server-Sent Events) 模式**：通过 HTTP 流式传输，兼容性更好，支持远程连接 (推荐 Cherry Studio 使用)。
+2.  **Stdio (Standard Input/Output) 模式**：通过标准输入输出通信，适合本地集成 (Claude Desktop 默认方式)。
+
+---
+
+### 方式一：SSE 模式 (推荐 / Cherry Studio)
+
+#### 1. 启动服务器
+
+运行项目根目录下的 `run_mcp_sse.bat`，或者在终端执行：
+
+```bash
+python mcp_server.py --transport sse --host 0.0.0.0 --port 8000
+```
+
+服务器启动后，SSE 端点地址为：`http://localhost:8000/sse`
+
+#### 2. 配置客户端 (以 Cherry Studio 为例)
+
+1.  打开 Cherry Studio 设置 -> 助手/工具 -> MCP 服务器。
+2.  添加新服务器：
+    *   **类型**: `SSE`
+    *   **URL**: `http://localhost:8000/sse`
+    *   **名称**: `personal-brain` (任意)
+
+> **注意**: 请确保在启动服务器的终端或 `.env` 文件中配置了 `DASHSCOPE_API_KEY` 环境变量，否则工具调用会失败。
+
+---
+
+### 方式二：Stdio 模式 (Claude Desktop)
+
+直接配置客户端启动 Python 脚本。
 
 在 Claude Desktop 的配置文件 (`claude_desktop_config.json`) 中添加：
 
@@ -136,7 +171,8 @@ PersonalBrain 支持 MCP 协议，可以作为工具被 Claude Desktop、Trae �
     "personal-brain": {
       "command": "D:/python_programs/second-brain/.venv/Scripts/python.exe",
       "args": [
-        "D:/python_programs/second-brain/mcp_server.py"
+        "D:/python_programs/second-brain/mcp_server.py",
+        "--transport", "stdio"
       ],
       "env": {
         "DASHSCOPE_API_KEY": "your-api-key"
@@ -146,5 +182,5 @@ PersonalBrain 支持 MCP 协议，可以作为工具被 Claude Desktop、Trae �
 }
 ```
 
-或者直接运行 `run_mcp.bat` 进行测试。
+或者直接运行 `run_mcp.bat` 进行测试 (默认为 stdio 模式)。
 
