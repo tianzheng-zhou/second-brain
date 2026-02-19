@@ -13,3 +13,4 @@ mcp
 python-dotenv
 dashscope
 uvicorn
+oss2

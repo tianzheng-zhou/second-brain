@@ -11,6 +11,8 @@ from personal_brain.config import (
     VISION_MODEL
 )
 from personal_brain.core.models import FileType
+from personal_brain.utils.aliyun_oss import AliyunOSS
+from personal_brain.utils.mineru import MinerUClient
 
 # Configure OpenAI client for DashScope
 client = None
@@ -26,6 +28,52 @@ def _encode_image(image_path: Path) -> str:
     """Encode image to base64 string."""
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
+
+def _process_pdf(file_path: Path) -> str:
+    """Process PDF using Aliyun OSS and MinerU."""
+    try:
+        # Initialize clients
+        oss = AliyunOSS()
+        mineru = MinerUClient()
+    except ValueError as e:
+        print(f"PDF processing setup failed: {e}")
+        return f"[Error: PDF processing setup failed - {e}]"
+    except Exception as e:
+        print(f"PDF processing setup error: {e}")
+        return f"[Error: PDF processing setup error - {e}]"
+
+    object_name = None
+    try:
+        # 1. Upload to OSS
+        print(f"Uploading {file_path.name} to OSS...")
+        object_name = oss.upload_file(file_path)
+        
+        # 2. Generate Signed URL
+        url = oss.sign_url(object_name, expiration=3600)
+        
+        # 3. Submit to MinerU
+        print(f"Submitting to MinerU...")
+        task_id = mineru.submit_task(url, is_ocr=True)
+        
+        # 4. Wait for result
+        zip_url = mineru.wait_for_completion(task_id)
+        
+        # 5. Download and extract
+        content = mineru.download_and_extract_markdown(zip_url)
+        
+        return content
+        
+    except Exception as e:
+        print(f"Error processing PDF {file_path}: {e}")
+        return f"[Error processing PDF: {e}]"
+        
+    finally:
+        # 6. Cleanup OSS
+        if object_name:
+            try:
+                oss.delete_file(object_name)
+            except Exception as e:
+                print(f"Warning: Failed to delete temp file from OSS: {e}")
 
 def extract_text(file_path: Path, file_type: FileType) -> str:
     """Extract text from file using appropriate method."""
@@ -82,6 +130,9 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
         # Placeholder for audio transcription
         # DashScope has audio models (Paraformer), but sticking to text/vision for now as requested
         return "[Audio file - transcription not implemented]"
+        
+    elif file_type == FileType.PDF:
+        return _process_pdf(file_path)
     
     return ""
 

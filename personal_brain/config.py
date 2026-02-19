@@ -24,6 +24,16 @@ RERANK_MODEL = "qwen3-vl-rerank"
 VISION_MODEL = "qwen3-vl-plus"
 CHAT_MODEL = "qwen3-max"
 
+# Aliyun OSS Configuration
+ALIYUN_ACCESS_KEY_ID = os.getenv("ALIYUN_ACCESS_KEY_ID")
+ALIYUN_ACCESS_KEY_SECRET = os.getenv("ALIYUN_ACCESS_KEY_SECRET")
+ALIYUN_OSS_ENDPOINT = os.getenv("ALIYUN_OSS_ENDPOINT", "oss-cn-hangzhou.aliyuncs.com")
+ALIYUN_OSS_BUCKET = os.getenv("ALIYUN_OSS_BUCKET")
+
+# MinerU Configuration
+MINERU_API_TOKEN = os.getenv("MINERU_API_TOKEN")
+MINERU_BASE_URL = os.getenv("MINERU_BASE_URL", "https://mineru.net/api/v4")
+
 # Ensure directories exist
 def ensure_dirs():
     if not STORAGE_PATH.exists():

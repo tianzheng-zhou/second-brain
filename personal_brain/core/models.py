@@ -8,6 +8,7 @@ class FileType(str, Enum):
     IMAGE = "image"
     AUDIO = "audio"
     TEXT = "text"
+    PDF = "pdf"
     UNKNOWN = "unknown"
 
 class FileStatus(str, Enum):

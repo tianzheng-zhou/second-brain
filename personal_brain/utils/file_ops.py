@@ -24,7 +24,9 @@ def get_file_type(file_path: Path) -> FileType:
         return FileType.IMAGE
     elif mime_type.startswith("audio/"):
         return FileType.AUDIO
-    elif mime_type.startswith("text/") or mime_type in ["application/pdf", "application/json"]:
+    elif mime_type == "application/pdf":
+        return FileType.PDF
+    elif mime_type.startswith("text/") or mime_type in ["application/json"]:
         return FileType.TEXT
     else:
         return FileType.UNKNOWN
