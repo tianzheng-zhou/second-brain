@@ -20,6 +20,7 @@ DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs
 # Models
 EMBEDDING_MODEL = "text-embedding-v4"
 EMBEDDING_DIMENSION = 1024
+RERANK_MODEL = "qwen3-rerank"
 VISION_MODEL = "qwen3-vl-plus"
 CHAT_MODEL = "qwen3-max"
 
