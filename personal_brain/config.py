@@ -8,11 +8,16 @@ DB_NAME = "brain.db"
 # Environment variables can override defaults
 STORAGE_PATH = Path(os.getenv("PB_STORAGE_PATH", DEFAULT_HOME))
 DB_PATH = Path(os.getenv("PB_DB_PATH", STORAGE_PATH / DB_NAME))
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
 
-# Embedding model
-EMBEDDING_MODEL = "nomic-embed-text"
-VISION_MODEL = "llama3.2-vision"
+# DashScope Configuration
+DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
+
+# Models
+EMBEDDING_MODEL = "text-embedding-v3"
+EMBEDDING_DIMENSION = 1024
+VISION_MODEL = "qwen-vl-max"
+CHAT_MODEL = "qwen3-max"
 
 # Ensure directories exist
 def ensure_dirs():

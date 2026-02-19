@@ -18,15 +18,13 @@ PersonalBrain 是一个旨在处理海量个人信息的系统。它允许用户
 
 ### 3.1 前置要求
 
-PersonalBrain 依赖 [Ollama](https://ollama.com/) 进行本地 AI 推理（文本嵌入和图像识别）。
+PersonalBrain 使用阿里云百炼 (DashScope) 提供的云端 AI 模型服务。
 
-1.  下载并安装 Ollama。
-2.  拉取所需模型：
-    ```bash
-    ollama pull nomic-embed-text
-    ollama pull llama3.2-vision
-    ```
-3.  确保 Ollama 服务正在运行（默认端口 11434）。
+1.  注册阿里云账号并开通百炼服务。
+2.  获取 API Key。
+3.  设置环境变量 `DASHSCOPE_API_KEY`：
+    *   Windows (PowerShell): `$env:DASHSCOPE_API_KEY="your-api-key"`
+    *   Linux/macOS: `export DASHSCOPE_API_KEY="your-api-key"`
 
 ### 3.2 安装依赖
 
@@ -42,6 +40,12 @@ pip install -r requirements.txt
 
 ```bash
 python -m personal_brain.cli init
+```
+
+**注意**：如果您之前使用过本地模型版本，请先重置数据库以清除不兼容的向量数据：
+
+```bash
+python -m personal_brain.cli reset
 ```
 这将会在用户目录下创建 `personal_brain_data` 文件夹用于存储数据。
 
@@ -88,6 +92,7 @@ python -m personal_brain.cli cleanup
 
 ```bash
 pb init                    # 初始化数据库和目录
+pb reset                   # 重置数据库 (切换模型时使用)
 pb ingest [path]           # 处理inbox或指定文件
 pb search "query"          # 语义搜索
 pb cleanup [--dry-run]     # 运行垃圾清理

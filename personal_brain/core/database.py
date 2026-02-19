@@ -2,7 +2,7 @@ import sqlite3
 import struct
 import json
 from pathlib import Path
-from personal_brain.config import DB_PATH
+from personal_brain.config import DB_PATH, EMBEDDING_DIMENSION
 
 def get_db_connection():
     """
@@ -56,9 +56,9 @@ def init_db():
         # Check if vec0 module exists (extension loaded)
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='vec_items'")
         if not cursor.fetchone():
-             cursor.execute("""
+             cursor.execute(f"""
                 CREATE VIRTUAL TABLE vec_items USING vec0(
-                    embedding float[768]
+                    embedding float[{EMBEDDING_DIMENSION}]
                 )
             """)
     except Exception as e:

@@ -1,41 +1,57 @@
-import sys
-import requests
 import os
-from personal_brain.config import OLLAMA_BASE_URL, EMBEDDING_MODEL, VISION_MODEL
+import sys
+from openai import OpenAI
+from personal_brain.config import (
+    DASHSCOPE_API_KEY, 
+    DASHSCOPE_BASE_URL, 
+    EMBEDDING_MODEL, 
+    VISION_MODEL,
+    CHAT_MODEL
+)
 
-def check_ollama():
-    print(f"Checking Ollama status at {OLLAMA_BASE_URL}...")
+def check_dashscope():
+    print(f"Checking DashScope configuration...")
+    print(f"API Key present: {'Yes' if DASHSCOPE_API_KEY else 'No'}")
+    print(f"Base URL: {DASHSCOPE_BASE_URL}")
+    
+    if not DASHSCOPE_API_KEY:
+        print("❌ DASHSCOPE_API_KEY is missing. Please set it in your environment.")
+        return
+
+    client = OpenAI(
+        api_key=DASHSCOPE_API_KEY,
+        base_url=DASHSCOPE_BASE_URL
+    )
+
     try:
-        # Check if Ollama is running
-        response = requests.get(f"{OLLAMA_BASE_URL}/api/tags")
-        if response.status_code == 200:
-            print("✅ Ollama is running.")
-            models = [m['name'] for m in response.json()['models']]
-            print(f"Found {len(models)} models.")
-            
-            # Check for embedding model
-            if any(EMBEDDING_MODEL in m for m in models):
-                print(f"✅ Embedding model '{EMBEDDING_MODEL}' found.")
-            else:
-                print(f"❌ Embedding model '{EMBEDDING_MODEL}' NOT found.")
-                print(f"   Please run: ollama pull {EMBEDDING_MODEL}")
-                
-            # Check for vision model
-            if any(VISION_MODEL in m for m in models):
-                print(f"✅ Vision model '{VISION_MODEL}' found.")
-            else:
-                print(f"❌ Vision model '{VISION_MODEL}' NOT found.")
-                print(f"   Please run: ollama pull {VISION_MODEL}")
-                
-        else:
-            print(f"❌ Ollama responded with status code {response.status_code}")
-            
-    except requests.exceptions.ConnectionError:
-        print("❌ Could not connect to Ollama. Is it installed and running?")
-        print("   Download from: https://ollama.com/")
-        print("   Default port is 11434.")
+        # Simple chat completion test
+        print(f"Testing connection with {CHAT_MODEL}...")
+        completion = client.chat.completions.create(
+            model=CHAT_MODEL,
+            messages=[
+                {"role": "user", "content": "Hello, are you working?"}
+            ]
+        )
+        print(f"✅ Connection successful!")
+        print(f"Response: {completion.choices[0].message.content}")
+        
+        # Test embedding
+        print(f"\nTesting embedding with {EMBEDDING_MODEL}...")
+        res = client.embeddings.create(
+            model=EMBEDDING_MODEL,
+            input="Test embedding",
+            dimensions=1024
+        )
+        emb = res.data[0].embedding
+        print(f"✅ Embedding generated. Dimension: {len(emb)}")
+
+        print(f"\nConfiguration summary:")
+        print(f"  - Chat Model: {CHAT_MODEL}")
+        print(f"  - Embedding Model: {EMBEDDING_MODEL}")
+        print(f"  - Vision Model: {VISION_MODEL}")
+        
     except Exception as e:
-        print(f"❌ Error checking Ollama: {e}")
+        print(f"❌ Error connecting to DashScope: {e}")
 
 if __name__ == "__main__":
-    check_ollama()
+    check_dashscope()

@@ -1,5 +1,5 @@
 click
-ollama
+openai
 pydantic
 sqlite-vec
 pillow

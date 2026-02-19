@@ -17,6 +17,24 @@ def init():
     click.echo(f"Initialized PersonalBrain at {STORAGE_PATH}")
 
 @cli.command()
+@click.confirmation_option(prompt='Are you sure you want to drop the database? This is irreversible.')
+def reset():
+    """Reset the database (useful when changing models)."""
+    import os
+    from personal_brain.config import DB_PATH
+    if DB_PATH.exists():
+        try:
+            os.remove(DB_PATH)
+            click.echo("Database deleted.")
+        except Exception as e:
+            click.echo(f"Error deleting database: {e}")
+    else:
+        click.echo("Database does not exist.")
+    
+    # Re-initialize
+    init()
+
+@cli.command()
 @click.argument('path', type=click.Path(exists=True))
 def ingest(path):
     """Ingest files from a path (file or directory)."""

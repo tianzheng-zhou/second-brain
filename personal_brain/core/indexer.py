@@ -1,14 +1,35 @@
 import os
-import ollama
+import base64
 from pathlib import Path
-from personal_brain.config import OLLAMA_BASE_URL, EMBEDDING_MODEL, VISION_MODEL
+from openai import OpenAI
+from personal_brain.config import (
+    DASHSCOPE_API_KEY, 
+    DASHSCOPE_BASE_URL, 
+    EMBEDDING_MODEL, 
+    EMBEDDING_DIMENSION,
+    VISION_MODEL
+)
 from personal_brain.core.models import FileType
 
-# Configure Ollama host
-os.environ["OLLAMA_HOST"] = OLLAMA_BASE_URL
+# Configure OpenAI client for DashScope
+client = None
+if DASHSCOPE_API_KEY:
+    client = OpenAI(
+        api_key=DASHSCOPE_API_KEY,
+        base_url=DASHSCOPE_BASE_URL
+    )
+
+def _encode_image(image_path: Path) -> str:
+    """Encode image to base64 string."""
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
 
 def extract_text(file_path: Path, file_type: FileType) -> str:
     """Extract text from file using appropriate method."""
+    if not client:
+        print("Error: DASHSCOPE_API_KEY not set.")
+        return ""
+
     if file_type == FileType.TEXT:
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -16,37 +37,63 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
         except Exception as e:
             print(f"Error reading text file {file_path}: {e}")
             return ""
+            
     elif file_type == FileType.IMAGE:
-        # Use llama3.2-vision to describe image
+        # Use qwen-vl-max to describe image
         try:
-            # Check if model exists, if not pull it?
-            # For now assume user has it or we catch error.
-            res = ollama.chat(
+            base64_image = _encode_image(file_path)
+            
+            # Identify mime type based on extension
+            suffix = file_path.suffix.lower()
+            mime_type = "image/jpeg"
+            if suffix == ".png":
+                mime_type = "image/png"
+            elif suffix == ".webp":
+                mime_type = "image/webp"
+            elif suffix == ".gif":
+                mime_type = "image/gif"
+                
+            response = client.chat.completions.create(
                 model=VISION_MODEL,
-                messages=[{
-                    'role': 'user',
-                    'content': 'Describe this image in detail and extract any visible text.',
-                    'images': [str(file_path)]
-                }]
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this image in detail and extract any visible text."},
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{base64_image}"
+                                }
+                            }
+                        ]
+                    }
+                ]
             )
-            return res['message']['content']
+            return response.choices[0].message.content
         except Exception as e:
             print(f"Error processing image {file_path}: {e}")
             return ""
+            
     elif file_type == FileType.AUDIO:
         # Placeholder for audio transcription
-        # Could use whisper via ollama if available
+        # DashScope has audio models (Paraformer), but sticking to text/vision for now as requested
         return "[Audio file - transcription not implemented]"
     
     return ""
 
 def generate_embedding(text: str):
     """Generate embedding for text."""
-    if not text:
+    if not text or not client:
         return None
     try:
-        res = ollama.embeddings(model=EMBEDDING_MODEL, prompt=text)
-        return res['embedding']
+        # Ensure dimensions match DB schema
+        res = client.embeddings.create(
+            model=EMBEDDING_MODEL, 
+            input=text,
+            dimensions=EMBEDDING_DIMENSION
+        )
+        return res.data[0].embedding
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return None
