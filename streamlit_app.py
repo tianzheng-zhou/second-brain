@@ -2,9 +2,10 @@ import streamlit as st
 import os
 import time
 from pathlib import Path
-from personal_brain.core.database import init_db
+import pandas as pd
+from personal_brain.core.database import init_db, get_all_files, delete_file_record, get_db_schema
 from personal_brain.config import ensure_dirs, STORAGE_PATH, DB_PATH
-from personal_brain.core.ingestion import ingest_path
+from personal_brain.core.ingestion import ingest_path, refresh_index_for_file
 from personal_brain.core.search import search_files
 from personal_brain.core.ask import ask_brain
 
@@ -230,6 +231,103 @@ elif choice == "Manage":
                 if st.button("Cancel"):
                     st.session_state['confirm_reset'] = False
                     st.rerun()
+
+    st.markdown("---")
+    
+    st.subheader("File Management")
+    
+    # Auto-Refresh Logic (on page load/button click)
+    if st.button("Scan & Auto-Index Missing"):
+        # Scan STORAGE_PATH for files not in DB
+        with st.status("Scanning storage...", expanded=True) as status:
+            files_in_db = {f['path'] for f in get_all_files()}
+            files_found = 0
+            
+            # Walk through STORAGE_PATH
+            for root, _, filenames in os.walk(STORAGE_PATH):
+                for filename in filenames:
+                    file_path = str(Path(root) / filename)
+                    
+                    # Skip if already in DB (normalization might be needed)
+                    # Simple string match for now
+                    if file_path in files_in_db:
+                        continue
+                        
+                    # Also skip hidden files or system files
+                    if filename.startswith('.'):
+                        continue
+                        
+                    st.write(f"Found new file: {filename}")
+                    try:
+                        ingest_path(file_path)
+                        files_found += 1
+                    except Exception as e:
+                        st.error(f"Failed to ingest {filename}: {e}")
+            
+            if files_found > 0:
+                status.update(label=f"Scan complete! Ingested {files_found} new files.", state="complete", expanded=False)
+                st.success(f"Successfully auto-indexed {files_found} files.")
+                time.sleep(1)
+                st.rerun()
+            else:
+                status.update(label="Scan complete. No new files found.", state="complete", expanded=False)
+                st.info("System is up to date.")
+
+    # Get all files
+    files = get_all_files()
+    
+    if not files:
+        st.info("No files in database.")
+    else:
+        # Create DataFrame for display
+        df = pd.DataFrame(files)
+        
+        # Select columns to display
+        display_cols = ['filename', 'type', 'size_bytes', 'created_at', 'status', 'id']
+        st.dataframe(df[display_cols], width='stretch')
+        
+        # File Actions
+        st.markdown("### File Actions")
+        
+        selected_file_id = st.selectbox("Select file to manage:", options=[f['id'] for f in files], format_func=lambda x: next((f['filename'] for f in files if f['id'] == x), x))
+        
+        if selected_file_id:
+            selected_file = next((f for f in files if f['id'] == selected_file_id), None)
+            if selected_file:
+                st.write(f"**Selected:** {selected_file['filename']} ({selected_file['type']})")
+                
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    if st.button("🔄 Refresh Index"):
+                        with st.spinner("Refreshing index..."):
+                            if refresh_index_for_file(selected_file_id):
+                                st.success("Index refreshed!")
+                                time.sleep(1)
+                                st.rerun()
+                            else:
+                                st.error("Failed to refresh index.")
+                                
+                with c2:
+                    if st.button("🗑️ Delete"):
+                         if delete_file_record(selected_file_id):
+                             st.success("File deleted from DB!")
+                             time.sleep(1)
+                             st.rerun()
+                         else:
+                             st.error("Failed to delete file.")
+                
+                with c3:
+                    with st.expander("View Details"):
+                        # Truncate ocr_text for display to prevent browser crash
+                        display_file = selected_file.copy()
+                        if display_file.get('ocr_text') and len(display_file['ocr_text']) > 1000:
+                            display_file['ocr_text'] = display_file['ocr_text'][:1000] + "... [Truncated for display]"
+                        st.json(display_file)
+
+    st.markdown("---")
+    with st.expander("Database Schema (Debug)"):
+        schema = get_db_schema()
+        st.json(schema)
 
 # Footer
 st.sidebar.markdown("---")

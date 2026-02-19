@@ -148,5 +148,74 @@ def get_file(file_id: str):
         return dict(row)
     return None
 
-if __name__ == "__main__":
-    init_db()
+def get_all_files():
+    """
+    Get all files from the database.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM files ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching all files: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_db_schema():
+    """
+    Get the database schema (list of tables and their columns).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    schema_info = {}
+    try:
+        # Get list of tables
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+        tables = cursor.fetchall()
+        
+        for table in tables:
+            table_name = table['name']
+            cursor.execute(f"PRAGMA table_info({table_name})")
+            columns = cursor.fetchall()
+            schema_info[table_name] = [dict(col) for col in columns]
+            
+        return schema_info
+    except Exception as e:
+        print(f"Error fetching schema: {e}")
+        return {}
+    finally:
+        conn.close()
+
+def delete_file_record(file_id: str):
+    """
+    Delete a file record and its associated embeddings from the database.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Get rowid from file_embeddings to delete from vec_items
+        cursor.execute("SELECT rowid FROM file_embeddings WHERE file_id = ?", (file_id,))
+        row = cursor.fetchone()
+        
+        if row:
+            rowid = row['rowid']
+            # Delete from vec_items (virtual table)
+            # Note: vec0 usually handles deletion via rowid
+            cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (rowid,))
+            
+        # Delete from file_embeddings
+        cursor.execute("DELETE FROM file_embeddings WHERE file_id = ?", (file_id,))
+        
+        # Delete from files
+        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error deleting file record {file_id}: {e}")
+        return False
+    finally:
+        conn.close()

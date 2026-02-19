@@ -53,7 +53,7 @@ class MinerUClient:
         resp.raise_for_status()
         return resp.json()
 
-    def wait_for_completion(self, task_id: str, timeout: int = 600) -> str:
+    def wait_for_completion(self, task_id: str, timeout: int = 3600) -> str:
         """Poll for task completion and return the download URL (zip)."""
         print(f"Waiting for task {task_id} to complete...")
         start_time = time.time()
@@ -86,8 +86,26 @@ class MinerUClient:
     def download_and_extract_markdown(self, zip_url: str) -> str:
         """Download the result ZIP and extract the markdown content."""
         print("Downloading result...")
-        resp = requests.get(zip_url)
-        resp.raise_for_status()
+        
+        # Retry mechanism for download
+        max_retries = 3
+        retry_delay = 2
+        
+        for attempt in range(max_retries):
+            try:
+                resp = requests.get(zip_url, timeout=300) # Add timeout
+                resp.raise_for_status()
+                break # Success
+            except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.Timeout) as e:
+                if attempt < max_retries - 1:
+                    print(f"Download failed (attempt {attempt+1}/{max_retries}): {e}. Retrying in {retry_delay}s...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2 # Exponential backoff
+                else:
+                    raise Exception(f"Failed to download result after {max_retries} attempts: {e}")
+            except Exception as e:
+                # Other errors (e.g. 404, 403) - don't retry
+                raise e
         
         with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
             # Find the markdown file

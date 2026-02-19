@@ -14,6 +14,54 @@ from personal_brain.core.models import FileType
 from personal_brain.utils.aliyun_oss import AliyunOSS
 from personal_brain.utils.mineru import MinerUClient
 
+# Simple text splitter logic
+def recursive_character_text_splitter(text: str, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
+    """
+    Split text into chunks of specified size with overlap.
+    This is a simplified implementation of RecursiveCharacterTextSplitter.
+    """
+    if not text:
+        return []
+        
+    separators = ["\n\n", "\n", " ", ""]
+    chunks = []
+    
+    # Simple implementation: split by length first, respecting basic separators could be added
+    # For now, let's do a sliding window approach which is robust enough
+    
+    start = 0
+    text_len = len(text)
+    
+    while start < text_len:
+        end = start + chunk_size
+        
+        # Adjust end to not break words if possible (look for space or newline)
+        if end < text_len:
+            # Try to find a separator near the end
+            found_separator = False
+            for sep in separators:
+                if sep == "": continue
+                # Search backwards from end
+                sep_pos = text.rfind(sep, start, end)
+                if sep_pos != -1 and sep_pos > start + chunk_size // 2: # Don't go back too far
+                    end = sep_pos + len(sep)
+                    found_separator = True
+                    break
+        
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        
+        # Move start forward, accounting for overlap
+        start = end - chunk_overlap
+        if start < 0: start = 0 # Should not happen but safety
+        
+        # If we didn't advance (e.g. chunk size smaller than one word?), force advance
+        if start <= (end - chunk_size):
+             start = end
+             
+    return chunks
+
 # Configure OpenAI client for DashScope
 client = None
 if DASHSCOPE_API_KEY:
@@ -37,10 +85,10 @@ def _process_pdf(file_path: Path) -> str:
         mineru = MinerUClient()
     except ValueError as e:
         print(f"PDF processing setup failed: {e}")
-        return f"[Error: PDF processing setup failed - {e}]"
+        return "" # Return empty on setup failure
     except Exception as e:
         print(f"PDF processing setup error: {e}")
-        return f"[Error: PDF processing setup error - {e}]"
+        return ""
 
     object_name = None
     try:
@@ -65,7 +113,7 @@ def _process_pdf(file_path: Path) -> str:
         
     except Exception as e:
         print(f"Error processing PDF {file_path}: {e}")
-        return f"[Error processing PDF: {e}]"
+        return "" # Return empty on processing failure
         
     finally:
         # 6. Cleanup OSS
@@ -137,7 +185,12 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
     return ""
 
 def generate_embedding(text: str):
-    """Generate embedding for text using qwen3-vl-embedding."""
+    """
+    Generate embedding for text using qwen3-vl-embedding.
+    If text is too long, splits it into chunks and returns the average embedding (or list of embeddings).
+    Current DB schema supports one embedding per file, so we average them for now.
+    TODO: Support multiple chunks per file in DB.
+    """
     if not text:
         return None
         
@@ -145,43 +198,68 @@ def generate_embedding(text: str):
         print("Error: DASHSCOPE_API_KEY not set.")
         return None
 
-    try:
-        # Use qwen3-vl-embedding via DashScope SDK
-        # Input format for multimodal embedding: input=[{"text": "..."}]
-        resp = dashscope.MultiModalEmbedding.call(
-            model=EMBEDDING_MODEL,
-            input=[{"text": text}],
-            # User requested using largest dimension (default 2560 for qwen3-vl-embedding)
-            # parameters={"dimension": EMBEDDING_DIMENSION} # If needed, but user said default is 2560
-        )
-        
-        if resp.status_code == 200:
-            # Check response structure
-            # Handle both attribute access and dict access
-            output = getattr(resp, 'output', None)
-            if output is None and isinstance(resp, dict):
-                output = resp.get('output')
+    # Split text if too long (approx check, model limit is tokens but chars is proxy)
+    # qwen3-vl-embedding context length is large, but API might have limits or latency issues
+    # Let's split if > 2000 chars to be safe and avoid "InternalError.Algo"
+    MAX_CHARS = 2000
+    chunks = [text]
+    if len(text) > MAX_CHARS:
+        print(f"Text length {len(text)} > {MAX_CHARS}, splitting...")
+        # Use simple chunking with list slicing which is fast
+        chunks = [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
+        print(f"Split into {len(chunks)} chunks.")
+    
+    all_embeddings = []
+    total_chunks = len(chunks)
+    
+    for i, chunk in enumerate(chunks):
+        if total_chunks > 1:
+            print(f"Processing chunk {i+1}/{total_chunks}...")
+        try:
+            # Use qwen3-vl-embedding via DashScope SDK
+            # Input format for multimodal embedding: input=[{"text": "..."}]
+            resp = dashscope.MultiModalEmbedding.call(
+                model=EMBEDDING_MODEL,
+                input=[{"text": chunk}],
+                # User requested using largest dimension (default 2560 for qwen3-vl-embedding)
+                # parameters={"dimension": EMBEDDING_DIMENSION} # If needed, but user said default is 2560
+            )
             
-            if output:
-                embeddings = getattr(output, 'embeddings', None)
-                if embeddings is None and isinstance(output, dict):
-                    embeddings = output.get('embeddings')
+            if resp.status_code == 200:
+                # Check response structure
+                # Handle both attribute access and dict access
+                output = getattr(resp, 'output', None)
+                if output is None and isinstance(resp, dict):
+                    output = resp.get('output')
                 
-                if embeddings and len(embeddings) > 0:
-                    embedding_item = embeddings[0]
-                    embedding = getattr(embedding_item, 'embedding', None)
-                    if embedding is None and isinstance(embedding_item, dict):
-                        embedding = embedding_item.get('embedding')
+                if output:
+                    embeddings = getattr(output, 'embeddings', None)
+                    if embeddings is None and isinstance(output, dict):
+                        embeddings = output.get('embeddings')
                     
-                    if embedding:
-                        return embedding
+                    if embeddings and len(embeddings) > 0:
+                        embedding_item = embeddings[0]
+                        embedding = getattr(embedding_item, 'embedding', None)
+                        if embedding is None and isinstance(embedding_item, dict):
+                            embedding = embedding_item.get('embedding')
+                        
+                        if embedding:
+                            all_embeddings.append(embedding)
+            else:
+                print(f"Error generating embedding for chunk {i}: {resp.code} - {resp.message}")
+                
+        except Exception as e:
+            print(f"Error generating embedding for chunk {i}: {e}")
             
-            print(f"Unexpected response format from embedding model: {resp}")
-            return None
-        else:
-            print(f"Error generating embedding: {resp.code} - {resp.message}")
-            return None
-            
-    except Exception as e:
-        print(f"Error generating embedding: {e}")
+    if not all_embeddings:
         return None
+        
+    # If single chunk, return it
+    if len(all_embeddings) == 1:
+        return all_embeddings[0]
+        
+    # If multiple chunks, compute average (Mean Pooling)
+    # This is a temporary solution until DB supports multiple chunks
+    print(f"Averaging {len(all_embeddings)} embeddings...")
+    avg_embedding = [sum(x) / len(all_embeddings) for x in zip(*all_embeddings)]
+    return avg_embedding
