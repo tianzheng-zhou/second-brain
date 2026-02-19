@@ -1,5 +1,9 @@
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Default paths
 DEFAULT_HOME = Path.home() / "personal_brain_data"
@@ -14,9 +18,9 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 # Models
-EMBEDDING_MODEL = "text-embedding-v3"
+EMBEDDING_MODEL = "text-embedding-v4"
 EMBEDDING_DIMENSION = 1024
-VISION_MODEL = "qwen-vl-max"
+VISION_MODEL = "qwen3-vl-plus"
 CHAT_MODEL = "qwen3-max"
 
 # Ensure directories exist

@@ -10,3 +10,4 @@ tqdm
 tenacity
 streamlit
 mcp
+python-dotenv
