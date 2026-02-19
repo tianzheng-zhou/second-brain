@@ -6,6 +6,7 @@ from personal_brain.core.database import init_db
 from personal_brain.config import ensure_dirs, STORAGE_PATH, DB_PATH
 from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.search import search_files
+from personal_brain.core.ask import ask_brain
 
 # Page configuration
 st.set_page_config(
@@ -24,37 +25,24 @@ st.markdown("""
         color: #4B0082;
         margin-bottom: 1rem;
     }
-    .sub-header {
-        font-size: 1.5rem;
-        font-weight: 600;
-        color: #333;
-        margin-top: 2rem;
-        margin-bottom: 1rem;
-    }
-    .card {
-        background-color: #f9f9f9;
+    .chat-message {
         padding: 1.5rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        border-radius: 0.5rem;
         margin-bottom: 1rem;
+        display: flex;
+        flex-direction: row;
+        align-items: flex-start;
     }
-    .card-title {
-        font-size: 1.2rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
+    .chat-message.user {
+        background-color: #f0f2f6;
     }
-    .card-meta {
-        font-size: 0.9rem;
-        color: #666;
-        margin-bottom: 0.5rem;
+    .chat-message.assistant {
+        background-color: #ffffff;
+        border: 1px solid #e0e0e0;
     }
-    .card-snippet {
-        font-size: 1rem;
-        color: #333;
-        background-color: #fff;
-        padding: 0.5rem;
-        border-radius: 5px;
-        border: 1px solid #eee;
+    .source-expander {
+        margin-top: 10px;
+        font-size: 0.8rem;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -63,7 +51,7 @@ st.markdown("""
 st.sidebar.title("🧠 PersonalBrain")
 st.sidebar.markdown("Your second brain for managing personal information.")
 
-menu = ["Search", "Ingest", "Manage"]
+menu = ["Chat", "Ingest", "Manage"]
 choice = st.sidebar.selectbox("Navigation", menu)
 
 # Helper functions
@@ -72,55 +60,70 @@ def get_db_status():
         return "Active", "green"
     return "Not Initialized", "red"
 
-# Search Page
-if choice == "Search":
-    st.markdown('<div class="main-header">Semantic Search</div>', unsafe_allow_html=True)
+# Chat Page
+if choice == "Chat":
+    st.markdown('<div class="main-header">Chat with your Brain</div>', unsafe_allow_html=True)
     
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        query = st.text_input("What are you looking for?", placeholder="e.g., 'notes about machine learning' or 'invoice from last month'")
-    with col2:
-        limit = st.slider("Limit results", min_value=1, max_value=20, value=5)
-    
-    if query:
-        with st.spinner("Searching your brain..."):
-            try:
-                # Check DB status first
-                if not os.path.exists(DB_PATH):
-                    st.error("Database not initialized. Please go to 'Manage' tab and initialize first.")
-                else:
-                    results = search_files(query, limit)
-                    
-                    if not results:
-                        st.info("No matching results found.")
-                    else:
-                        st.markdown(f"Found **{len(results)}** results:")
-                        
-                        for res in results:
-                            score = res.get('trash_score', 0)
-                            dist = res.get('distance', 0)
-                            file_type = res.get('type', 'unknown')
-                            filename = res.get('filename', 'Unknown')
-                            path = res.get('path', '')
-                            ocr_text = res.get('ocr_text', '')
-                            
-                            with st.container():
-                                st.markdown(f"""
-                                <div class="card">
-                                    <div class="card-title">{filename}</div>
-                                    <div class="card-meta">
-                                        Type: {file_type} | Distance: {dist:.4f} | Trash Score: {score:.2f}
-                                    </div>
-                                    <div class="card-meta">Path: {path}</div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                                
-                                if ocr_text:
-                                    with st.expander("View Content Snippet"):
-                                        st.text(ocr_text[:500] + "..." if len(ocr_text) > 500 else ocr_text)
+    # Initialize chat history
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-            except Exception as e:
-                st.error(f"An error occurred during search: {str(e)}")
+    # Display chat messages from history on app rerun
+    for message in st.session_state.messages:
+        with st.chat_message(message["role"]):
+            st.markdown(message["content"])
+            if "sources" in message and message["sources"]:
+                with st.expander(f"📚 References ({len(message['sources'])})"):
+                    for src in message["sources"]:
+                        st.markdown(f"- **{src['filename']}** ({src['type']}) - Score: {src['score']:.4f}")
+
+    # React to user input
+    if prompt := st.chat_input("Ask something about your notes..."):
+        # Check DB status first
+        if not os.path.exists(DB_PATH):
+            st.error("Database not initialized. Please go to 'Manage' tab and initialize first.")
+        else:
+            # Display user message in chat message container
+            st.chat_message("user").markdown(prompt)
+            # Add user message to chat history
+            st.session_state.messages.append({"role": "user", "content": prompt})
+
+            # Display assistant response in chat message container
+            with st.chat_message("assistant"):
+                message_placeholder = st.empty()
+                full_response = ""
+                
+                with st.spinner("Thinking..."):
+                    # Call RAG function
+                    # Convert session state history to format expected by ask_brain (optional, but good for context)
+                    history_for_rag = [{"role": m["role"], "content": m["content"]} for m in st.session_state.messages[:-1]]
+                    
+                    response_stream, sources = ask_brain(prompt, history=history_for_rag, stream=True)
+                    
+                    if isinstance(response_stream, str):
+                        # Error case
+                        full_response = response_stream
+                        message_placeholder.markdown(full_response)
+                    else:
+                        # Stream response
+                        for chunk in response_stream:
+                            if chunk.choices[0].delta.content:
+                                full_response += chunk.choices[0].delta.content
+                                message_placeholder.markdown(full_response + "▌")
+                        message_placeholder.markdown(full_response)
+                
+                # Show sources if available
+                if sources:
+                    with st.expander(f"📚 References ({len(sources)})"):
+                        for src in sources:
+                            st.markdown(f"- **{src['filename']}** ({src['type']}) - Score: {src['score']:.4f}")
+
+            # Add assistant response to chat history
+            st.session_state.messages.append({
+                "role": "assistant", 
+                "content": full_response,
+                "sources": sources
+            })
 
 # Ingest Page
 elif choice == "Ingest":
@@ -230,4 +233,4 @@ elif choice == "Manage":
 
 # Footer
 st.sidebar.markdown("---")
-st.sidebar.caption("v0.1.0 | Powered by Streamlit")
+st.sidebar.caption("v0.2.0 | Powered by Streamlit")

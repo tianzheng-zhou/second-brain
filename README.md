@@ -100,7 +100,7 @@ pb cleanup [--dry-run]     # 运行垃圾清理
 
 ## 6. 图形化界面 (GUI)
 
-本项目提供了一个基于 Streamlit 的图形化界面，方便用户更直观地管理和搜索内容。
+本项目提供了一个基于 Streamlit 的智能对话界面，让您可以像与智能体对话一样查询您的知识库。
 
 ### 启动 GUI
 
@@ -112,8 +112,39 @@ streamlit run streamlit_app.py
 
 或者直接双击运行 `run_gui.bat` (Windows)。
 
-GUI 包含以下功能模块：
-- **Search**: 语义搜索界面，支持结果预览。
-- **Ingest**: 文件导入工具，支持路径导入和直接上传文件。
-- **Manage**: 数据库初始化与重置管理。
+功能：
+- **Chat**: 与 AI 助手对话，基于您的笔记回答问题，并提供来源引用。
+- **Ingest**: 导入文件和文件夹。
+- **Manage**: 数据库管理。
+
+## 7. Model Context Protocol (MCP) 服务器
+
+PersonalBrain 支持 MCP 协议，可以作为工具被 Claude Desktop、Trae 或其他支持 MCP 的客户端集成。
+
+### 功能
+- `search_notes`: 搜索笔记。
+- `ask_brain_agent`: 基于 RAG 回答问题。
+- `ingest_content`: 导入新内容。
+
+### 配置 MCP (以 Claude Desktop 为例)
+
+在 Claude Desktop 的配置文件 (`claude_desktop_config.json`) 中添加：
+
+```json
+{
+  "mcpServers": {
+    "personal-brain": {
+      "command": "D:/python_programs/second-brain/.venv/Scripts/python.exe",
+      "args": [
+        "D:/python_programs/second-brain/mcp_server.py"
+      ],
+      "env": {
+        "DASHSCOPE_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+或者直接运行 `run_mcp.bat` 进行测试。
 
