@@ -1,5 +1,6 @@
 import os
 import base64
+import dashscope
 from pathlib import Path
 from openai import OpenAI
 from personal_brain.config import (
@@ -18,6 +19,8 @@ if DASHSCOPE_API_KEY:
         api_key=DASHSCOPE_API_KEY,
         base_url=DASHSCOPE_BASE_URL
     )
+    # Also set dashscope api key for SDK usage
+    dashscope.api_key = DASHSCOPE_API_KEY
 
 def _encode_image(image_path: Path) -> str:
     """Encode image to base64 string."""
@@ -83,17 +86,51 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
     return ""
 
 def generate_embedding(text: str):
-    """Generate embedding for text."""
-    if not text or not client:
+    """Generate embedding for text using qwen3-vl-embedding."""
+    if not text:
         return None
+        
+    if not dashscope.api_key:
+        print("Error: DASHSCOPE_API_KEY not set.")
+        return None
+
     try:
-        # Ensure dimensions match DB schema
-        res = client.embeddings.create(
-            model=EMBEDDING_MODEL, 
-            input=text,
-            dimensions=EMBEDDING_DIMENSION
+        # Use qwen3-vl-embedding via DashScope SDK
+        # Input format for multimodal embedding: input=[{"text": "..."}]
+        resp = dashscope.MultiModalEmbedding.call(
+            model=EMBEDDING_MODEL,
+            input=[{"text": text}],
+            # User requested using largest dimension (default 2560 for qwen3-vl-embedding)
+            # parameters={"dimension": EMBEDDING_DIMENSION} # If needed, but user said default is 2560
         )
-        return res.data[0].embedding
+        
+        if resp.status_code == 200:
+            # Check response structure
+            # Handle both attribute access and dict access
+            output = getattr(resp, 'output', None)
+            if output is None and isinstance(resp, dict):
+                output = resp.get('output')
+            
+            if output:
+                embeddings = getattr(output, 'embeddings', None)
+                if embeddings is None and isinstance(output, dict):
+                    embeddings = output.get('embeddings')
+                
+                if embeddings and len(embeddings) > 0:
+                    embedding_item = embeddings[0]
+                    embedding = getattr(embedding_item, 'embedding', None)
+                    if embedding is None and isinstance(embedding_item, dict):
+                        embedding = embedding_item.get('embedding')
+                    
+                    if embedding:
+                        return embedding
+            
+            print(f"Unexpected response format from embedding model: {resp}")
+            return None
+        else:
+            print(f"Error generating embedding: {resp.code} - {resp.message}")
+            return None
+            
     except Exception as e:
         print(f"Error generating embedding: {e}")
         return None

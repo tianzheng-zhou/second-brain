@@ -9,12 +9,16 @@ def cli():
     """PersonalBrain CLI - Your second brain."""
     pass
 
-@cli.command()
-def init():
-    """Initialize the database and storage directories."""
+def _do_init():
+    """Shared initialization logic."""
     ensure_dirs()
     init_db()
     click.echo(f"Initialized PersonalBrain at {STORAGE_PATH}")
+
+@cli.command()
+def init():
+    """Initialize the database and storage directories."""
+    _do_init()
 
 @cli.command()
 @click.confirmation_option(prompt='Are you sure you want to drop the database? This is irreversible.')
@@ -32,7 +36,7 @@ def reset():
         click.echo("Database does not exist.")
     
     # Re-initialize
-    init()
+    _do_init()
 
 @cli.command()
 @click.argument('path', type=click.Path(exists=True))

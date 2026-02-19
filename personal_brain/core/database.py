@@ -9,6 +9,7 @@ def get_db_connection():
     Get a connection to the SQLite database.
     Tries to load sqlite-vec extension if available.
     """
+    # print(f"Connecting to database at: {DB_PATH}")
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
     

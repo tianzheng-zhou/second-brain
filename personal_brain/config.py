@@ -18,9 +18,9 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 DASHSCOPE_BASE_URL = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
 
 # Models
-EMBEDDING_MODEL = "text-embedding-v4"
-EMBEDDING_DIMENSION = 1024
-RERANK_MODEL = "qwen3-rerank"
+EMBEDDING_MODEL = "qwen3-vl-embedding"
+EMBEDDING_DIMENSION = 2560
+RERANK_MODEL = "qwen3-vl-rerank"
 VISION_MODEL = "qwen3-vl-plus"
 CHAT_MODEL = "qwen3-max"
 

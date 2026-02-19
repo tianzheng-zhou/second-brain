@@ -1,11 +1,12 @@
 import os
+import requests
 from typing import List, Dict, Any
-from dashscope import TextReRank
+# from dashscope import TextReRank # No longer using TextReRank class for qwen3-vl-rerank
 from personal_brain.config import RERANK_MODEL, DASHSCOPE_API_KEY
 
 def rerank_documents(query: str, documents: List[str], top_n: int = None) -> List[Dict[str, Any]]:
     """
-    Rerank a list of documents based on the query using DashScope's TextReRank.
+    Rerank a list of documents based on the query using DashScope's qwen3-vl-rerank via REST API.
     
     Args:
         query: The search query.
@@ -20,41 +21,58 @@ def rerank_documents(query: str, documents: List[str], top_n: int = None) -> Lis
         return []
         
     # Ensure API key is set
-    if not os.environ.get("DASHSCOPE_API_KEY"):
-        if DASHSCOPE_API_KEY:
-            os.environ["DASHSCOPE_API_KEY"] = DASHSCOPE_API_KEY
-        else:
-            print("Warning: DASHSCOPE_API_KEY not set for reranking.")
-            # Fallback to original order with dummy scores
-            return [{"index": i, "relevance_score": 0.0, "document": doc} for i, doc in enumerate(documents)]
+    api_key = os.environ.get("DASHSCOPE_API_KEY") or DASHSCOPE_API_KEY
+    if not api_key:
+        print("Warning: DASHSCOPE_API_KEY not set for reranking.")
+        return [{"index": i, "relevance_score": 0.0, "document": doc} for i, doc in enumerate(documents)]
 
     try:
-        # DashScope TextReRank call
-        resp = TextReRank.call(
-            model=RERANK_MODEL,
-            query=query,
-            documents=documents,
-            top_n=top_n
-        )
+        # qwen3-vl-rerank uses the generic text-rerank endpoint but with specific model
+        url = "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
         
-        if resp.status_code == 200:
-            # Output format: 
-            # resp.output.results = [{"index": 0, "relevance_score": 0.8}, ...]
-            results = resp.output.results
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": RERANK_MODEL,
+            "input": {
+                "query": query,
+                "documents": documents
+            },
+            "parameters": {
+                "return_documents": True
+            }
+        }
+        
+        if top_n is not None:
+            payload["parameters"]["top_n"] = top_n
             
-            # Map back to documents
-            reranked = []
-            for item in results:
-                idx = item.index
-                score = item.relevance_score
-                reranked.append({
-                    "index": idx,
-                    "relevance_score": score,
-                    "document": documents[idx]
-                })
-            return reranked
+        response = requests.post(url, headers=headers, json=payload)
+        
+        if response.status_code == 200:
+            data = response.json()
+            # Output format check
+            if "output" in data and "results" in data["output"]:
+                results = data["output"]["results"]
+                
+                # Map back to documents
+                reranked = []
+                for item in results:
+                    idx = item.get("index")
+                    score = item.get("relevance_score")
+                    reranked.append({
+                        "index": idx,
+                        "relevance_score": score,
+                        "document": documents[idx]
+                    })
+                return reranked
+            else:
+                print(f"Unexpected rerank response format: {data}")
+                return [{"index": i, "relevance_score": 0.0, "document": doc} for i, doc in enumerate(documents)]
         else:
-            print(f"Rerank API error: {resp.code} - {resp.message}")
+            print(f"Rerank API error: {response.status_code} - {response.text}")
             return [{"index": i, "relevance_score": 0.0, "document": doc} for i, doc in enumerate(documents)]
             
     except Exception as e:
