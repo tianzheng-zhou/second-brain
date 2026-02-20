@@ -109,21 +109,20 @@ class SQLiteDataLayer(BaseDataLayer):
             self._initialized = True
 
     async def get_user(self, identifier: str) -> Optional[PersistedUser]:
-        print(f"[DEBUG] get_user called for identifier: {identifier}")
+        # print(f"[DEBUG] get_user called for identifier: {identifier}")
         await self.initialize_db()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE identifier = ?", (identifier,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
-                    print(f"[DEBUG] get_user found: {row['id']}")
+                    # print(f"[DEBUG] get_user found: {row['id']}")
                     return PersistedUser(
                         id=row['id'],
                         identifier=row['identifier'],
-                        metadata=json.loads(row['metadata']) if row['metadata'] else {},
-                        createdAt=row['createdAt']
+                        createdAt=row['createdAt'],
+                        metadata=json.loads(row['metadata']) if row['metadata'] else {}
                     )
-        print(f"[DEBUG] get_user not found for: {identifier}")
         return None
 
     async def create_user(self, user: User) -> Optional[PersistedUser]:
@@ -150,42 +149,30 @@ class SQLiteDataLayer(BaseDataLayer):
         )
 
     async def list_threads(self, pagination: Pagination, filter: ThreadFilter) -> Any:
-        # returns PaginatedResponse[ThreadDict]
-        print(f"[DEBUG] list_threads called. Filter userId: {filter.userId}, search: {filter.search}")
+        # print(f"[DEBUG] list_threads called. Filter userId: {filter.userId}, search: {filter.search}")
         await self.initialize_db()
         
-        limit = pagination.first if pagination.first else 20
-        offset = 0
-        if pagination.cursor:
-            try:
-                offset = int(pagination.cursor)
-            except:
-                pass
-
-        where_clauses = []
+        limit = pagination.first
+        cursor_val = pagination.cursor if pagination.cursor else "0"
+        offset = int(cursor_val)
+        
+        query = "SELECT * FROM threads WHERE 1=1"
         params = []
         
         if filter.userId:
-            where_clauses.append("userId = ?")
+            query += " AND userId = ?"
             params.append(filter.userId)
             
         if filter.search:
-            where_clauses.append("name LIKE ?")
+            query += " AND name LIKE ?"
             params.append(f"%{filter.search}%")
-
-        if filter.feedback:
-            # Join with feedback table? Too complex for now, ignore
-            pass
             
-        where_str = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        query += " ORDER BY createdAt DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
         
+        threads = []
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
-            
-            query = f"SELECT * FROM threads {where_str} ORDER BY createdAt DESC LIMIT ? OFFSET ?"
-            params.extend([limit, offset])
-            
-            threads = []
             async with db.execute(query, params) as cursor:
                 async for row in cursor:
                     threads.append(ThreadDict(
@@ -196,11 +183,11 @@ class SQLiteDataLayer(BaseDataLayer):
                         userIdentifier=row['userIdentifier'],
                         tags=json.loads(row['tags']) if row['tags'] else [],
                         metadata=json.loads(row['metadata']) if row['metadata'] else {},
-                        steps=[], # Steps loaded separately in get_thread
+                        steps=[],
                         elements=[]
                     ))
             
-            print(f"[DEBUG] list_threads found {len(threads)} threads")
+            # print(f"[DEBUG] list_threads found {len(threads)} threads")
             return type('PaginatedResponse', (), {
                 'data': threads,
                 'pageInfo': type('PageInfo', (), {
@@ -226,8 +213,46 @@ class SQLiteDataLayer(BaseDataLayer):
             async with db.execute("SELECT * FROM threads WHERE id = ?", (thread_id,)) as cursor:
                 thread_row = await cursor.fetchone()
                 if not thread_row:
+                    print(f"[DEBUG] get_thread: Thread {thread_id} not found")
                     return None
+                
+            print(f"[DEBUG] get_thread: Found thread {thread_id}, userId: {thread_row['userId']}")
             
+            # Check if userId is None or empty
+            if not thread_row['userId']:
+                # If userId is missing, but userIdentifier is present, try to find userId
+                if thread_row['userIdentifier']:
+                    print(f"[DEBUG] get_thread: userId missing for {thread_row['userIdentifier']}, trying to fetch")
+                    # Ideally update the thread, but here just try to get the ID for return
+                    async with db.execute("SELECT id FROM users WHERE identifier = ?", (thread_row['userIdentifier'],)) as cursor:
+                        user_row = await cursor.fetchone()
+                        if user_row:
+                            # Update thread row data for return (not DB update here to keep it simple/safe)
+                            # But wait, thread_row is Row object (tuple-like). We need to reconstruct.
+                            # Just override the userId in ThreadDict construction
+                            print(f"[DEBUG] get_thread: Found userId {user_row['id']} for {thread_row['userIdentifier']}")
+                            # We'll use this ID later
+                            real_user_id = user_row['id']
+                        else:
+                             real_user_id = thread_row['userId']
+                else:
+                     real_user_id = thread_row['userId']
+            else:
+                 real_user_id = thread_row['userId']
+
+            # Check if userIdentifier is missing but we have userId
+            real_user_identifier = thread_row['userIdentifier']
+            if not real_user_identifier and real_user_id:
+                # print(f"[DEBUG] get_thread: userIdentifier missing for userId {real_user_id}, trying to fetch")
+                async with db.execute("SELECT identifier FROM users WHERE id = ?", (real_user_id,)) as cursor:
+                    user_row = await cursor.fetchone()
+                    if user_row:
+                        # print(f"[DEBUG] get_thread: Found identifier {user_row['identifier']} for userId {real_user_id}")
+                        real_user_identifier = user_row['identifier']
+                        # Auto-fix the DB to prevent future lookups
+                        await db.execute("UPDATE threads SET userIdentifier = ? WHERE id = ?", (real_user_identifier, thread_id))
+                        await db.commit()
+
             # Get Steps
             steps = []
             async with db.execute("SELECT * FROM steps WHERE threadId = ? ORDER BY createdAt ASC", (thread_id,)) as cursor:
@@ -241,8 +266,8 @@ class SQLiteDataLayer(BaseDataLayer):
                         streaming=bool(row['streaming']),
                         waitForAnswer=bool(row['waitForAnswer']),
                         isError=bool(row['isError']),
-                        metadata=json.loads(row['metadata']) if row['metadata'] else {},
-                        tags=json.loads(row['tags']) if row['tags'] else [],
+                        metadata=(json.loads(row['metadata']) if row['metadata'] else {}) or {},
+                        tags=(json.loads(row['tags']) if row['tags'] else []) or [],
                         input=row['input'],
                         output=row['output'],
                         createdAt=row['createdAt'],
@@ -275,12 +300,27 @@ class SQLiteDataLayer(BaseDataLayer):
                         props=json.loads(row['props']) if row['props'] else {}
                     ))
 
+            # Get Feedbacks
+            feedbacks = []
+            async with db.execute("SELECT * FROM feedbacks WHERE threadId = ?", (thread_id,)) as cursor:
+                async for row in cursor:
+                    feedbacks.append(FeedbackDict(
+                        id=row['id'],
+                        forId=row['forId'],
+                        threadId=row['threadId'],
+                        value=row['value'],
+                        comment=row['comment']
+                    ))
+            
+            for step in steps:
+                step['feedback'] = next((f for f in feedbacks if f['forId'] == step['id']), None)
+
             return ThreadDict(
                 id=thread_row['id'],
                 createdAt=thread_row['createdAt'],
                 name=thread_row['name'],
-                userId=thread_row['userId'],
-                userIdentifier=thread_row['userIdentifier'],
+                userId=real_user_id,
+                userIdentifier=real_user_identifier,
                 tags=json.loads(thread_row['tags']) if thread_row['tags'] else [],
                 metadata=json.loads(thread_row['metadata']) if thread_row['metadata'] else {},
                 steps=steps,
@@ -288,7 +328,7 @@ class SQLiteDataLayer(BaseDataLayer):
             )
 
     async def create_thread(self, thread_dict: ThreadDict) -> Optional[str]:
-        print(f"[DEBUG] create_thread called. ID: {thread_dict['id']}, userId: {thread_dict.get('userId')}, userIdentifier: {thread_dict.get('userIdentifier')}")
+        # print(f"[DEBUG] create_thread called. ID: {thread_dict['id']}, userId: {thread_dict.get('userId')}, userIdentifier: {thread_dict.get('userIdentifier')}")
         await self.initialize_db()
         
         tags = json.dumps(thread_dict.get('tags', []))
@@ -312,7 +352,7 @@ class SQLiteDataLayer(BaseDataLayer):
         return thread_dict['id']
 
     async def update_thread(self, thread_id: str, name: Optional[str] = None, user_id: Optional[str] = None, metadata: Optional[Dict] = None, tags: Optional[List[str]] = None):
-        print(f"[DEBUG] update_thread called for {thread_id}. userId: {user_id}")
+        # print(f"[DEBUG] update_thread called for {thread_id}. userId: {user_id}")
         await self.initialize_db()
         
         # Prepare data for upsert

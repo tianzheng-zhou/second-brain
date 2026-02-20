@@ -28,7 +28,7 @@ def get_data_layer():
 
 @cl.password_auth_callback
 async def auth_callback(username, password):
-    print(f"[DEBUG] auth_callback for user: {username}")
+    # print(f"[DEBUG] auth_callback for user: {username}")
     # Default simple authentication
     if username == "admin" and password == "admin":
         # Ensure user exists in DB and get stable ID
@@ -42,7 +42,7 @@ async def auth_callback(username, password):
         # This ensures threads are linked to the same user across sessions
         user = cl.User(identifier=username)
         if persisted_user and persisted_user.id:
-            print(f"[DEBUG] Assigning persisted ID to user: {persisted_user.id}")
+            # print(f"[DEBUG] Assigning persisted ID to user: {persisted_user.id}")
             # Force set the ID to match database
             # Note: cl.User might be a Pydantic model or DataClass, handling both
             if hasattr(user, "id"):
@@ -50,13 +50,24 @@ async def auth_callback(username, password):
             else:
                 # Fallback if id is not a direct attribute (unlikely in Chainlit)
                 object.__setattr__(user, "id", persisted_user.id)
+            
+            # Update metadata if needed
+            if hasattr(user, "metadata"):
+                user.metadata = persisted_user.metadata
+                
         return user
-    print(f"[DEBUG] Auth failed for user: {username}")
+    # print(f"[DEBUG] Auth failed for user: {username}")
     return None
 
 @cl.on_chat_start
 async def start():
     """Initialize the chat session."""
+    # user = cl.user_session.get("user")
+    # if user:
+    #     print(f"[DEBUG] on_chat_start: user={user.identifier}, id={user.id}")
+    # else:
+    #     print("[DEBUG] on_chat_start: No user in session")
+
     # Initialize empty history for LLM context
     cl.user_session.set("history", [])
     
@@ -70,7 +81,12 @@ async def on_chat_resume(thread: cl.types.ThreadDict):
     """Restore the chat session when a user clicks on a history item."""
     # Rebuild history for LLM context from the thread steps
     history = []
-    for step in thread["steps"]:
+    # print(f"[DEBUG] on_chat_resume thread keys: {thread.keys()}")
+    
+    # Check if 'steps' is in thread, if not, try to fetch it or use empty
+    steps = thread.get("steps", [])
+    
+    for step in steps:
         # Only include messages in context, not tool outputs or other steps
         if step["type"] == "user_message":
             history.append({"role": "user", "content": step["output"]})
@@ -82,6 +98,7 @@ async def on_chat_resume(thread: cl.types.ThreadDict):
         history = history[-20:]
         
     cl.user_session.set("history", history)
+    # print(f"[DEBUG] Resumed chat with {len(history)} messages in history")
 
 @cl.set_chat_profiles
 async def chat_profile():
@@ -95,15 +112,44 @@ async def chat_profile():
 
 @cl.action_callback("delete_file")
 async def on_delete_file(action: cl.Action):
-    file_id = action.value
+    file_id = action.payload.get("value")
     # Delete file logic
     try:
         if delete_file_record(file_id):
             await cl.Message(content=f"✅ File {file_id} deleted successfully.").send()
+            # Refresh list if it was side view? Hard to refresh side view without new message.
         else:
             await cl.Message(content=f"❌ Failed to delete file {file_id}.").send()
     except Exception as e:
         await cl.Message(content=f"Error deleting file: {e}").send()
+
+async def list_files_message(display_in_side_view=False):
+    files = get_all_files()
+    if not files:
+        content = "No files found in database."
+        if display_in_side_view:
+             await cl.Message(content=content).send()
+        return cl.Message(content=content)
+    else:
+        file_list_md = "**Your Knowledge Base:**\n\n"
+        actions = []
+        for f in files: 
+            file_list_md += f"- **{f['filename']}** ({f['type']}) - {f.get('size_bytes', 0)//1024} KB\n"
+            actions.append(
+                cl.Action(name="delete_file", payload={"value": str(f['id'])}, label=f"🗑️ Delete {f['filename'][:15]}...")
+            )
+        
+        if display_in_side_view:
+             element = cl.Text(name="知识库列表", content=file_list_md, display="side", language="markdown")
+             await cl.Message(content="✅ 列表已生成！\n请点击下方的 **“知识库列表”** 按钮/图标，在右侧侧边栏查看详细内容 👉", elements=[element]).send()
+             return None
+        
+        # Limit actions for inline display to avoid clutter
+        if len(actions) > 10:
+            file_list_md += "\n*(Showing first 10 delete buttons)*"
+            actions = actions[:10]
+            
+        return cl.Message(content=file_list_md, actions=actions)
 
 @cl.on_message
 async def main(message: cl.Message):
@@ -111,24 +157,13 @@ async def main(message: cl.Message):
     
     # --- 1. Handle Commands ---
     if message.content.strip() == "/files":
-        # List all files with delete buttons
-        files = get_all_files()
-        if not files:
-            await cl.Message(content="No files found in database.").send()
-        else:
-            # Create a list of actions for each file
-            actions = []
-            file_list_md = "**Your Files:**\n\n"
-            
-            # Show top 10 files to avoid clutter, or maybe just list them all?
-            # Actions limit might exist.
-            for f in files[:10]: # Limit to 10 for UI safety
-                file_list_md += f"- **{f['filename']}** ({f['type']})\n"
-                actions.append(
-                    cl.Action(name="delete_file", value=str(f['id']), label=f"Delete {f['filename'][:10]}...")
-                )
-            
-            await cl.Message(content=file_list_md, actions=actions).send()
+        msg = await list_files_message(display_in_side_view=False)
+        if msg:
+            await msg.send()
+        return
+
+    if message.content.strip() == "/side":
+        await list_files_message(display_in_side_view=True)
         return
 
     # --- 2. Handle File Uploads ---
