@@ -11,6 +11,14 @@ from chainlit.user import User, PersistedUser
 
 class SQLiteDataLayer(BaseDataLayer):
     def __init__(self, db_path: str = "chainlit.db"):
+        import os
+        # Ensure absolute path
+        if not os.path.isabs(db_path):
+            # Assume root of project if relative
+            # But where is root? Let's use current working directory or better yet, same dir as brain.db
+            # Let's use absolute path relative to CWD
+            db_path = os.path.abspath(db_path)
+            
         self.db_path = db_path
         self._initialized = False
 
@@ -101,24 +109,29 @@ class SQLiteDataLayer(BaseDataLayer):
             self._initialized = True
 
     async def get_user(self, identifier: str) -> Optional[PersistedUser]:
+        print(f"[DEBUG] get_user called for identifier: {identifier}")
         await self.initialize_db()
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute("SELECT * FROM users WHERE identifier = ?", (identifier,)) as cursor:
                 row = await cursor.fetchone()
                 if row:
+                    print(f"[DEBUG] get_user found: {row['id']}")
                     return PersistedUser(
                         id=row['id'],
                         identifier=row['identifier'],
                         metadata=json.loads(row['metadata']) if row['metadata'] else {},
                         createdAt=row['createdAt']
                     )
+        print(f"[DEBUG] get_user not found for: {identifier}")
         return None
 
     async def create_user(self, user: User) -> Optional[PersistedUser]:
+        print(f"[DEBUG] create_user called for: {user.identifier}")
         await self.initialize_db()
         user_id = str(uuid.uuid4())
-        created_at = time.strftime('%Y-%m-%dT%H:%M:%S.%fZ', time.gmtime())
+        # Use ISO 8601 format compatible with different platforms
+        created_at = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime())
         metadata = json.dumps(user.metadata) if user.metadata else "{}"
         
         async with aiosqlite.connect(self.db_path) as db:
@@ -128,6 +141,7 @@ class SQLiteDataLayer(BaseDataLayer):
             )
             await db.commit()
             
+        print(f"[DEBUG] create_user created id: {user_id}")
         return PersistedUser(
             id=user_id,
             identifier=user.identifier,
@@ -137,6 +151,7 @@ class SQLiteDataLayer(BaseDataLayer):
 
     async def list_threads(self, pagination: Pagination, filter: ThreadFilter) -> Any:
         # returns PaginatedResponse[ThreadDict]
+        print(f"[DEBUG] list_threads called. Filter userId: {filter.userId}, search: {filter.search}")
         await self.initialize_db()
         
         limit = pagination.first if pagination.first else 20
@@ -150,9 +165,9 @@ class SQLiteDataLayer(BaseDataLayer):
         where_clauses = []
         params = []
         
-        if filter.userIdentifier:
-            where_clauses.append("userIdentifier = ?")
-            params.append(filter.userIdentifier)
+        if filter.userId:
+            where_clauses.append("userId = ?")
+            params.append(filter.userId)
             
         if filter.search:
             where_clauses.append("name LIKE ?")
@@ -185,12 +200,21 @@ class SQLiteDataLayer(BaseDataLayer):
                         elements=[]
                     ))
             
+            print(f"[DEBUG] list_threads found {len(threads)} threads")
             return type('PaginatedResponse', (), {
                 'data': threads,
                 'pageInfo': type('PageInfo', (), {
                     'hasNextPage': len(threads) == limit,
-                    'endCursor': str(offset + limit)
-                })()
+                    'endCursor': str(offset + limit),
+                    'to_dict': lambda self: {
+                        'hasNextPage': self.hasNextPage,
+                        'endCursor': self.endCursor
+                    }
+                })(),
+                'to_dict': lambda self: {
+                    'data': [t for t in self.data],
+                    'pageInfo': self.pageInfo.to_dict()
+                }
             })()
 
     async def get_thread(self, thread_id: str) -> Optional[ThreadDict]:
@@ -264,6 +288,7 @@ class SQLiteDataLayer(BaseDataLayer):
             )
 
     async def create_thread(self, thread_dict: ThreadDict) -> Optional[str]:
+        print(f"[DEBUG] create_thread called. ID: {thread_dict['id']}, userId: {thread_dict.get('userId')}, userIdentifier: {thread_dict.get('userIdentifier')}")
         await self.initialize_db()
         
         tags = json.dumps(thread_dict.get('tags', []))
@@ -287,33 +312,35 @@ class SQLiteDataLayer(BaseDataLayer):
         return thread_dict['id']
 
     async def update_thread(self, thread_id: str, name: Optional[str] = None, user_id: Optional[str] = None, metadata: Optional[Dict] = None, tags: Optional[List[str]] = None):
+        print(f"[DEBUG] update_thread called for {thread_id}. userId: {user_id}")
         await self.initialize_db()
         
-        updates = []
-        params = []
+        # Prepare data for upsert
+        import time
+        created_at = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime())
         
-        if name is not None:
-            updates.append("name = ?")
-            params.append(name)
-        if user_id is not None:
-            updates.append("userId = ?")
-            params.append(user_id)
-        if metadata is not None:
-            updates.append("metadata = ?")
-            params.append(json.dumps(metadata))
-        if tags is not None:
-            updates.append("tags = ?")
-            params.append(json.dumps(tags))
-            
-        if not updates:
-            return
-
-        params.append(thread_id)
-        query = f"UPDATE threads SET {', '.join(updates)} WHERE id = ?"
+        metadata_json = json.dumps(metadata) if metadata else "{}"
+        tags_json = json.dumps(tags) if tags else "[]"
         
         async with aiosqlite.connect(self.db_path) as db:
-            await db.execute(query, params)
+            # Upsert logic: Try to insert, if exists (primary key conflict), then update
+            # We use INSERT OR IGNORE then UPDATE for SQLite compatibility or explicit upsert syntax
+            
+            # Using standard SQLite UPSERT syntax (requires SQLite 3.24+)
+            await db.execute("""
+                INSERT INTO threads (id, createdAt, name, userId, metadata, tags)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    name = COALESCE(excluded.name, threads.name),
+                    userId = COALESCE(excluded.userId, threads.userId),
+                    metadata = CASE WHEN excluded.metadata != '{}' THEN excluded.metadata ELSE threads.metadata END,
+                    tags = CASE WHEN excluded.tags != '[]' THEN excluded.tags ELSE threads.tags END
+            """, (thread_id, created_at, name, user_id, metadata_json, tags_json))
+            
             await db.commit()
+            
+    async def get_user_threads(self, pagination: Pagination, filter: ThreadFilter) -> Any:
+        return await self.list_threads(pagination, filter)
 
     async def delete_thread(self, thread_id: str):
         await self.initialize_db()
@@ -322,6 +349,7 @@ class SQLiteDataLayer(BaseDataLayer):
             await db.commit()
 
     async def create_step(self, step_dict: StepDict):
+        print(f"[DEBUG] create_step called for thread {step_dict['threadId']}. Type: {step_dict['type']}")
         await self.initialize_db()
         
         metadata = json.dumps(step_dict.get('metadata', {}))
@@ -331,7 +359,13 @@ class SQLiteDataLayer(BaseDataLayer):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """INSERT INTO steps (id, name, type, threadId, parentId, streaming, waitForAnswer, isError, metadata, tags, input, output, createdAt, start, end, generation, showInput, language, indent)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                   input = excluded.input,
+                   output = excluded.output,
+                   end = excluded.end,
+                   generation = excluded.generation
+                   """,
                 (
                     step_dict['id'],
                     step_dict['name'],
@@ -354,6 +388,13 @@ class SQLiteDataLayer(BaseDataLayer):
                     step_dict.get('indent')
                 )
             )
+            # Update thread timestamp
+            if step_dict.get('createdAt'):
+                await db.execute(
+                    "UPDATE threads SET createdAt = ? WHERE id = ?",
+                    (step_dict['createdAt'], step_dict['threadId'])
+                )
+            
             await db.commit()
 
     async def update_step(self, step_dict: StepDict):

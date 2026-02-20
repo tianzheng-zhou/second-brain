@@ -26,6 +26,34 @@ cl_data_layer = SQLiteDataLayer()
 def get_data_layer():
     return cl_data_layer
 
+@cl.password_auth_callback
+async def auth_callback(username, password):
+    print(f"[DEBUG] auth_callback for user: {username}")
+    # Default simple authentication
+    if username == "admin" and password == "admin":
+        # Ensure user exists in DB and get stable ID
+        persisted_user = await cl_data_layer.get_user(username)
+        if not persisted_user:
+            # Create user if not exists
+            temp_user = cl.User(identifier=username)
+            persisted_user = await cl_data_layer.create_user(temp_user)
+        
+        # Return User with STABLE ID from database
+        # This ensures threads are linked to the same user across sessions
+        user = cl.User(identifier=username)
+        if persisted_user and persisted_user.id:
+            print(f"[DEBUG] Assigning persisted ID to user: {persisted_user.id}")
+            # Force set the ID to match database
+            # Note: cl.User might be a Pydantic model or DataClass, handling both
+            if hasattr(user, "id"):
+                user.id = persisted_user.id
+            else:
+                # Fallback if id is not a direct attribute (unlikely in Chainlit)
+                object.__setattr__(user, "id", persisted_user.id)
+        return user
+    print(f"[DEBUG] Auth failed for user: {username}")
+    return None
+
 @cl.on_chat_start
 async def start():
     """Initialize the chat session."""
@@ -34,6 +62,8 @@ async def start():
     
     # Display welcome message
     await cl.Message(content="👋 Welcome to **PersonalBrain**! \n\nUpload files to add them to your knowledge base, or ask questions to search your notes.").send()
+    
+    # User is already handled in auth_callback, no need to re-check here
 
 @cl.on_chat_resume
 async def on_chat_resume(thread: cl.types.ThreadDict):
