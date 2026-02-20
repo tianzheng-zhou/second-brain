@@ -134,27 +134,82 @@ elif menu == "Knowledge Base":
             df = pd.DataFrame(files)
             
             # Search filter
-            search_term = st.text_input("🔍 Search files...", "")
+            col_search, col_ai = st.columns([4, 1])
+            with col_search:
+                search_term = st.text_input("🔍 Search files...", "")
+            with col_ai:
+                st.write("") # Spacer
+                st.write("") # Spacer
+                use_ai_search = st.toggle("🤖 AI Search", help="Use vector search to find semantically related files")
+            
             if search_term:
-                df = df[df['filename'].str.contains(search_term, case=False)]
+                if use_ai_search:
+                    with st.spinner("Searching knowledge base..."):
+                        # Use vector search to find relevant chunks/files
+                        # Increase limit to cast a wider net
+                        search_results = search_files(search_term, limit=20)
+                        
+                        if search_results:
+                            # Extract unique file IDs and their max scores
+                            relevant_files = {}
+                            for res in search_results:
+                                fid = res['file_id']
+                                score = res.get('score', 0)
+                                if fid not in relevant_files or score > relevant_files[fid]:
+                                    relevant_files[fid] = score
+                            
+                            # Filter dataframe
+                            df = df[df['id'].isin(relevant_files.keys())]
+                            
+                            # Add score column and sort
+                            df['relevance'] = df['id'].map(relevant_files)
+                            df = df.sort_values('relevance', ascending=False)
+                            
+                            st.caption(f"Found {len(df)} semantically related files.")
+                        else:
+                            st.warning("No related files found via AI search.")
+                            df = df.iloc[0:0] # Empty dataframe
+                else:
+                    # Standard substring match
+                    df = df[df['filename'].str.contains(search_term, case=False)]
             
             # Display as interactive table
-            col_widths = [3, 1, 1, 2]
-            header_cols = st.columns(col_widths + [2]) # +2 for actions
-            header_cols[0].markdown("**Filename**")
-            header_cols[1].markdown("**Type**")
-            header_cols[2].markdown("**Size**")
-            header_cols[3].markdown("**Date**")
-            header_cols[4].markdown("**Actions**")
+            if 'relevance' in df.columns:
+                col_widths = [3, 1, 1, 1, 1, 2]
+                header_cols = st.columns(col_widths + [2]) 
+                header_cols[0].markdown("**Filename**")
+                header_cols[1].markdown("**Score**")
+                header_cols[2].markdown("**Type**")
+                header_cols[3].markdown("**Size**")
+                header_cols[4].markdown("**Date**")
+                header_cols[5].markdown("**Actions**")
+            else:
+                col_widths = [3, 1, 1, 2]
+                header_cols = st.columns(col_widths + [2]) 
+                header_cols[0].markdown("**Filename**")
+                header_cols[1].markdown("**Type**")
+                header_cols[2].markdown("**Size**")
+                header_cols[3].markdown("**Date**")
+                header_cols[4].markdown("**Actions**")
             
             for index, row in df.iterrows():
-                cols = st.columns(col_widths + [2])
-                cols[0].write(f"📄 {row['filename']}")
-                cols[1].write(row['type'])
-                cols[2].write(f"{row['size_bytes']/1024:.1f} KB")
-                cols[3].write(row['created_at'])
+                if 'relevance' in df.columns:
+                    cols = st.columns(col_widths + [2])
+                    cols[0].write(f"📄 {row['filename']}")
+                    cols[1].write(f"{row['relevance']:.4f}")
+                    cols[2].write(row['type'])
+                    cols[3].write(f"{row['size_bytes']/1024:.1f} KB")
+                    cols[4].write(row['created_at'])
+                    action_col = cols[5]
+                else:
+                    cols = st.columns(col_widths + [2])
+                    cols[0].write(f"📄 {row['filename']}")
+                    cols[1].write(row['type'])
+                    cols[2].write(f"{row['size_bytes']/1024:.1f} KB")
+                    cols[3].write(row['created_at'])
+                    action_col = cols[4]
                 
-                with cols[4]:
+                with action_col:
                     b1, b2, b3 = st.columns(3)
                     with b1:
                         if st.button("👁️", key=f"view_{row['id']}", help="View Chunks"):
