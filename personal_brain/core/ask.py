@@ -29,8 +29,8 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
     client = get_client()
     
     # 1. Retrieve relevant context
-    # We search for top 5 relevant chunks
-    search_results = search_files(query, limit=5)
+    # We search for top 10 relevant chunks (increased from 5 for better context)
+    search_results = search_files(query, limit=10)
     
     context_str = ""
     sources = []
@@ -39,21 +39,23 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
         context_parts = []
         for i, res in enumerate(search_results):
             # Extract content snippet
-            content = res.get('ocr_text', '') or "No text content available."
-            # Truncate if too long (e.g. 1000 chars per chunk)
-            content = content[:1000]
+            # Try 'content' first (new chunk schema), then 'ocr_text' (legacy schema)
+            content = res.get('content') or res.get('ocr_text') or "No text content available."
+            
+            # Truncate if too long (e.g. 2000 chars per chunk to fit context)
+            if len(content) > 2000:
+                content = content[:2000] + "... [truncated]"
             
             filename = res.get('filename', 'Unknown File')
-            file_type = res.get('type', 'unknown')
-            score = res.get('distance', 0)
+            file_type = res.get('file_type') or res.get('type', 'unknown')
+            score = res.get('score', 0)
             
-            context_parts.append(f"--- Document {i+1} ---\nFile: {filename} ({file_type})\nContent: {content}\n")
+            context_parts.append(f"--- Document {i+1} ---\nFile: {filename} ({file_type})\nScore: {score:.4f}\nContent:\n{content}\n")
             
             # Record source for citation
             sources.append({
                 "filename": filename,
                 "type": file_type,
-                "path": res.get('path', ''),
                 "score": score
             })
             

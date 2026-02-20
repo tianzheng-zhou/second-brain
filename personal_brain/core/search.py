@@ -31,8 +31,8 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
         query_bytes = struct.pack(f'<{len(embedding)}f', *embedding)
         
         # Initial retrieval limit (fetch more for reranking)
-        # If reranking, fetch 4x the limit or at least 20
-        fetch_limit = max(20, limit * 4) if use_rerank else limit
+        # If reranking, fetch 10x the limit or at least 50
+        fetch_limit = max(50, limit * 10) if use_rerank else limit
         
         # Search using sqlite-vec
         cursor.execute("""

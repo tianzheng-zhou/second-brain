@@ -184,10 +184,52 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
     
     return ""
 
+import concurrent.futures
+import time
+
+def _generate_single_embedding(chunk, index, total):
+    """Helper function to generate embedding for a single chunk."""
+    if total > 1 and (index+1) % 5 == 0:
+        print(f"Embedding chunk {index+1}/{total}...")
+        
+    try:
+        # Use qwen3-vl-embedding via DashScope SDK
+        resp = dashscope.MultiModalEmbedding.call(
+            model=EMBEDDING_MODEL,
+            input=[{"text": chunk}]
+        )
+        
+        if resp.status_code == 200:
+            output = getattr(resp, 'output', None)
+            if output is None and isinstance(resp, dict):
+                output = resp.get('output')
+            
+            if output:
+                embeddings_data = getattr(output, 'embeddings', None)
+                if embeddings_data is None and isinstance(output, dict):
+                    embeddings_data = output.get('embeddings')
+                
+                if embeddings_data and len(embeddings_data) > 0:
+                    embedding_item = embeddings_data[0]
+                    embedding = getattr(embedding_item, 'embedding', None)
+                    if embedding is None and isinstance(embedding_item, dict):
+                        embedding = embedding_item.get('embedding')
+                    
+                    if embedding:
+                        return chunk, embedding
+        else:
+            print(f"Error generating embedding for chunk {index}: {resp.code} - {resp.message}")
+            
+    except Exception as e:
+        print(f"Error generating embedding for chunk {index}: {e}")
+        
+    return None, None
+
 def generate_embedding_chunks(text: str):
     """
     Generate embeddings for text using qwen3-vl-embedding.
     Splits text into chunks and returns (chunks, embeddings_list).
+    Uses parallel processing to speed up generation.
     """
     if not text:
         return [], []
@@ -198,46 +240,49 @@ def generate_embedding_chunks(text: str):
 
     # Use recursive splitter
     chunks = recursive_character_text_splitter(text, chunk_size=1500, chunk_overlap=200)
-    print(f"Split into {len(chunks)} chunks.")
+    total_chunks = len(chunks)
+    print(f"Split into {total_chunks} chunks. Starting parallel embedding generation...")
     
     valid_chunks = []
     embeddings = []
-    total_chunks = len(chunks)
     
-    for i, chunk in enumerate(chunks):
-        if total_chunks > 1 and (i+1) % 5 == 0:
-            print(f"Embedding chunk {i+1}/{total_chunks}...")
-        try:
-            # Use qwen3-vl-embedding via DashScope SDK
-            resp = dashscope.MultiModalEmbedding.call(
-                model=EMBEDDING_MODEL,
-                input=[{"text": chunk}]
-            )
+    # Use ThreadPoolExecutor for parallel processing with batching
+    # Batching helps reduce CPU spikes and memory usage by not submitting all tasks at once
+    batch_size = 5
+    
+    # Pre-allocate list for results to maintain order naturally
+    # (Though we still verify index for safety)
+    results = [None] * total_chunks
+    
+    with concurrent.futures.ThreadPoolExecutor(max_workers=batch_size) as executor:
+        for i in range(0, total_chunks, batch_size):
+            # Create a batch of tasks
+            batch_end = min(i + batch_size, total_chunks)
+            batch_futures = {}
             
-            if resp.status_code == 200:
-                output = getattr(resp, 'output', None)
-                if output is None and isinstance(resp, dict):
-                    output = resp.get('output')
-                
-                if output:
-                    embeddings_data = getattr(output, 'embeddings', None)
-                    if embeddings_data is None and isinstance(output, dict):
-                        embeddings_data = output.get('embeddings')
-                    
-                    if embeddings_data and len(embeddings_data) > 0:
-                        embedding_item = embeddings_data[0]
-                        embedding = getattr(embedding_item, 'embedding', None)
-                        if embedding is None and isinstance(embedding_item, dict):
-                            embedding = embedding_item.get('embedding')
-                        
-                        if embedding:
-                            valid_chunks.append(chunk)
-                            embeddings.append(embedding)
-            else:
-                print(f"Error generating embedding for chunk {i}: {resp.code} - {resp.message}")
-                
-        except Exception as e:
-            print(f"Error generating embedding for chunk {i}: {e}")
+            for j in range(i, batch_end):
+                chunk = chunks[j]
+                future = executor.submit(_generate_single_embedding, chunk, j, total_chunks)
+                batch_futures[future] = j
+            
+            # Wait for current batch to complete
+            for future in concurrent.futures.as_completed(batch_futures):
+                index = batch_futures[future]
+                try:
+                    chunk_res, embedding_res = future.result()
+                    if chunk_res and embedding_res:
+                        results[index] = (chunk_res, embedding_res)
+                except Exception as exc:
+                    print(f"Chunk {index} generated an exception: {exc}")
+            
+            # Small sleep to let CPU cool down and prevent rate limit spikes
+            time.sleep(0.2)
+
+    # Filter out None results (failed chunks)
+    valid_results = [r for r in results if r is not None]
+    
+    valid_chunks = [r[0] for r in valid_results]
+    embeddings = [r[1] for r in valid_results]
             
     return valid_chunks, embeddings
 
