@@ -83,14 +83,18 @@ class MinerUClient:
             
         raise TimeoutError("MinerU task timed out")
 
-    def download_and_extract_markdown(self, zip_url: str) -> str:
-        """Download the result ZIP and extract the markdown content."""
-        print("Downloading result...")
+    def download_and_extract_markdown(self, zip_url: str, save_dir: Path = None) -> Path:
+        """
+        Download the result ZIP and extract it to a directory.
+        Returns the path to the main markdown file.
+        """
+        print(f"Downloading result to {save_dir}...")
         
         # Retry mechanism for download
         max_retries = 3
         retry_delay = 2
         
+        resp = None
         for attempt in range(max_retries):
             try:
                 resp = requests.get(zip_url, timeout=300) # Add timeout
@@ -107,10 +111,11 @@ class MinerUClient:
                 # Other errors (e.g. 404, 403) - don't retry
                 raise e
         
+        if not resp:
+             raise Exception("Download failed (empty response)")
+
         with zipfile.ZipFile(io.BytesIO(resp.content)) as z:
             # Find the markdown file
-            # Usually named {filename}.md or inside a folder
-            # Let's look for any .md file
             md_files = [f for f in z.namelist() if f.endswith('.md') and not f.startswith('__MACOSX')]
             
             if not md_files:
@@ -119,10 +124,22 @@ class MinerUClient:
                 raise Exception("No markdown file found in MinerU result")
             
             # Prefer the one that matches the original filename if possible, or just the first one
-            # Usually MinerU puts it in a folder structure. 
-            # e.g. "demo/demo.md"
             target_file = md_files[0]
-            print(f"Extracting content from {target_file}")
             
-            with z.open(target_file) as f:
-                return f.read().decode('utf-8')
+            # If save_dir is provided, extract everything there
+            if save_dir:
+                save_dir.mkdir(parents=True, exist_ok=True)
+                z.extractall(save_dir)
+                return save_dir / target_file
+            else:
+                # Fallback to in-memory read (legacy behavior, but discouraged now)
+                # This path is mainly for backward compatibility if needed, 
+                # but better to force extraction for images.
+                # Let's just raise an error or return content if no save_dir provided?
+                # For now, let's keep the old behavior if save_dir is None, 
+                # but return string content (which breaks type hint, but python is dynamic).
+                # Wait, let's just return the content as a Path-like object (StringIO)? No.
+                # Let's just assume save_dir is always provided now.
+                print("Warning: No save_dir provided, returning content string (Legacy). Images will be lost.")
+                with z.open(target_file) as f:
+                    return f.read().decode('utf-8')

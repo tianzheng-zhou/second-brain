@@ -1,6 +1,8 @@
 import os
 import base64
 import dashscope
+import re
+import hashlib
 from pathlib import Path
 from openai import OpenAI
 from personal_brain.config import (
@@ -8,7 +10,8 @@ from personal_brain.config import (
     DASHSCOPE_BASE_URL, 
     EMBEDDING_MODEL, 
     EMBEDDING_DIMENSION,
-    VISION_MODEL
+    VISION_MODEL,
+    STORAGE_PATH
 )
 from personal_brain.core.models import FileType
 from personal_brain.utils.aliyun_oss import AliyunOSS
@@ -62,6 +65,207 @@ def recursive_character_text_splitter(text: str, chunk_size: int = 1500, chunk_o
              
     return chunks
 
+def _parse_multimodal_chunk(text: str, image_root: Path) -> list:
+    """Parse chunk text and resolve images for DashScope input."""
+    # Pattern: ![alt](path)
+    # We need to split text by images
+    pattern = r'!\[(.*?)\]\((.*?)\)'
+    parts = re.split(pattern, text)
+    matches = re.findall(pattern, text)
+    
+    inputs = []
+    
+    # re.split returns [text, alt, path, text, alt, path, text...]
+    # If no matches, parts = [text]
+    
+    current_text_idx = 0
+    match_idx = 0
+    
+    while current_text_idx < len(parts):
+        text_part = parts[current_text_idx]
+        if text_part.strip():
+            inputs.append({"text": text_part})
+        
+        # If there's a match following this text part
+        if match_idx < len(matches):
+            alt, path = matches[match_idx]
+            # Resolve path
+            # MinerU paths are relative to the markdown file location
+            # However, MinerU markdown might use paths like "images/xxx.jpg"
+            # And image_root is where the markdown file is.
+            # But wait, MinerU output structure:
+            # - xxx/
+            #   - xxx.md
+            #   - images/
+            #     - xxx.jpg
+            
+            # If path is "images/xxx.jpg", and image_root is "xxx/", then "xxx/images/xxx.jpg" works.
+            # But on Windows, paths might be tricky.
+            # Also, some paths might start with "./" or "/"
+            clean_path = path.lstrip('./').lstrip('/').replace('/', os.sep)
+            full_path = image_root / clean_path
+            
+            if full_path.exists():
+                # Convert to Base64
+                try:
+                    base64_img = _encode_image(full_path)
+                    mime_type = "image/jpeg"
+                    if full_path.suffix.lower() == ".png":
+                        mime_type = "image/png"
+                    elif full_path.suffix.lower() == ".webp":
+                        mime_type = "image/webp"
+                    elif full_path.suffix.lower() == ".gif":
+                        mime_type = "image/gif"
+                    
+                    inputs.append({"image": f"data:{mime_type};base64,{base64_img}"})
+                except Exception as e:
+                    print(f"Error encoding image {full_path}: {e}")
+            else:
+                # Try finding it recursively? Or maybe path is absolute?
+                # Check if it exists relative to image_root parent?
+                # Sometimes MinerU structure varies.
+                # Let's try to just find the file by name in image_root recursively
+                found = False
+                
+                # Check if it is in an 'images' folder inside image_root
+                # Based on user LS: d:\...\mineru_cache\...\images\xxx.jpg
+                # And image_root seems to be d:\...\mineru_cache\...\
+                # The path in markdown is likely "images/xxx.jpg"
+                
+                # Try direct check in 'images' folder if path is just filename
+                if 'images' not in str(clean_path):
+                     maybe_path = image_root / 'images' / Path(clean_path).name
+                     if maybe_path.exists():
+                         # Found in images subdir
+                         # Convert to Base64 to avoid Windows path issues with SDK
+                         try:
+                             base64_img = _encode_image(maybe_path)
+                             mime_type = "image/jpeg"
+                             if maybe_path.suffix.lower() == ".png":
+                                 mime_type = "image/png"
+                             elif maybe_path.suffix.lower() == ".webp":
+                                 mime_type = "image/webp"
+                             elif maybe_path.suffix.lower() == ".gif":
+                                 mime_type = "image/gif"
+                             
+                             inputs.append({"image": f"data:{mime_type};base64,{base64_img}"})
+                             found = True
+                         except Exception as e:
+                             print(f"Error encoding image {maybe_path}: {e}")
+                
+                if not found:
+                    for f in image_root.rglob(Path(path).name):
+                        # Found recursively
+                        try:
+                             base64_img = _encode_image(f)
+                             mime_type = "image/jpeg"
+                             if f.suffix.lower() == ".png":
+                                 mime_type = "image/png"
+                             elif f.suffix.lower() == ".webp":
+                                 mime_type = "image/webp"
+                             elif f.suffix.lower() == ".gif":
+                                 mime_type = "image/gif"
+                             
+                             inputs.append({"image": f"data:{mime_type};base64,{base64_img}"})
+                             found = True
+                             break
+                        except Exception as e:
+                             print(f"Error encoding image {f}: {e}")
+                
+                if not found:
+                    print(f"Warning: Image not found at {full_path}")
+                    # Keep text representation instead of failing?
+                    # But we consumed the text part in regex split.
+                    # We should probably add the markdown image syntax back as text fallback
+                    inputs.append({"text": f"![{alt}]({path})"})
+            
+            match_idx += 1
+            # Skip alt and path in parts list (they are at +1 and +2)
+            current_text_idx += 3
+        else:
+            current_text_idx += 1
+            
+    return inputs
+
+def markdown_multimodal_splitter(text: str, image_root: Path) -> tuple[list[str], list[list]]:
+    """
+    Split markdown into chunks, respecting image boundaries.
+    Returns (raw_chunks, input_lists).
+    """
+    # Simple strategy: Split by double newlines (paragraphs)
+    # If a paragraph has images, keep them together.
+    # Accumulate text-only paragraphs until size limit.
+    
+    paragraphs = text.split('\n\n')
+    
+    raw_chunks = []
+    input_lists = []
+    
+    current_chunk_text = []
+    current_chunk_inputs = []
+    current_len = 0
+    CHUNK_SIZE = 1000
+    
+    # DashScope Limitation: max 20 inputs (text/image parts) per API call
+    MAX_INPUTS_PER_CHUNK = 20
+    
+    for p in paragraphs:
+        # Parse this paragraph
+        p_inputs = _parse_multimodal_chunk(p, image_root)
+        
+        # Check if adding this paragraph would exceed limits
+        would_exceed_inputs = (len(current_chunk_inputs) + len(p_inputs)) > MAX_INPUTS_PER_CHUNK
+        would_exceed_len = (current_len + len(p)) > CHUNK_SIZE
+        
+        # If chunk is full or input count limit reached
+        if current_chunk_inputs and (would_exceed_len or would_exceed_inputs):
+             raw_chunks.append("".join(current_chunk_text))
+             input_lists.append(current_chunk_inputs)
+             current_chunk_text = []
+             current_chunk_inputs = []
+             current_len = 0
+             
+        # Add to current
+        if current_chunk_text:
+            current_chunk_text.append("\n\n")
+            # Add separator to inputs if previous was text
+            # Note: adding separator might increase input count if it's a new dict
+            # But here we append to existing text if possible, or new text dict
+            if current_chunk_inputs and "text" in current_chunk_inputs[-1]:
+                current_chunk_inputs[-1]["text"] += "\n\n"
+            elif current_chunk_inputs:
+                current_chunk_inputs.append({"text": "\n\n"})
+                # We added a new item, check limit again? 
+                # Actually, strictly speaking, we should check limit before adding separator too.
+                # But separator is small. Let's just be careful.
+                if len(current_chunk_inputs) > MAX_INPUTS_PER_CHUNK:
+                     # This edge case (separator pushing over limit) is rare but possible.
+                     # Force split previous chunk without separator? 
+                     # Or just accept 21? API says 20.
+                     # Let's simple: if we just split, current_chunk_inputs is empty, so we are fine.
+                     pass
+                
+        current_chunk_text.append(p)
+        current_chunk_inputs.extend(p_inputs)
+        
+        current_len += len(p)
+        
+        # If a single paragraph has > 20 inputs (e.g. many small images), we need to split it further?
+        # For now assume paragraph is reasonable.
+        if len(current_chunk_inputs) >= MAX_INPUTS_PER_CHUNK:
+             raw_chunks.append("".join(current_chunk_text))
+             input_lists.append(current_chunk_inputs)
+             current_chunk_text = []
+             current_chunk_inputs = []
+             current_len = 0
+             
+    # Flush remaining
+    if current_chunk_text:
+        raw_chunks.append("".join(current_chunk_text))
+        input_lists.append(current_chunk_inputs)
+        
+    return raw_chunks, input_lists
+
 # Configure OpenAI client for DashScope
 client = None
 if DASHSCOPE_API_KEY:
@@ -77,18 +281,18 @@ def _encode_image(image_path: Path) -> str:
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
 
-def _process_pdf(file_path: Path) -> str:
-    """Process PDF using Aliyun OSS and MinerU."""
+def _process_pdf(file_path: Path) -> tuple[str, Path]:
+    """Process PDF using Aliyun OSS and MinerU. Returns (content, image_root)."""
     try:
         # Initialize clients
         oss = AliyunOSS()
         mineru = MinerUClient()
     except ValueError as e:
         print(f"PDF processing setup failed: {e}")
-        return "" # Return empty on setup failure
+        return "", None # Return empty on setup failure
     except Exception as e:
         print(f"PDF processing setup error: {e}")
-        return ""
+        return "", None
 
     object_name = None
     try:
@@ -107,13 +311,20 @@ def _process_pdf(file_path: Path) -> str:
         zip_url = mineru.wait_for_completion(task_id)
         
         # 5. Download and extract
-        content = mineru.download_and_extract_markdown(zip_url)
+        # Create cache dir based on file hash or name
+        file_hash = hashlib.md5(str(file_path).encode()).hexdigest()
+        save_dir = STORAGE_PATH / "mineru_cache" / file_hash
         
-        return content
+        md_path = mineru.download_and_extract_markdown(zip_url, save_dir)
+        
+        with open(md_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            
+        return content, save_dir
         
     except Exception as e:
         print(f"Error processing PDF {file_path}: {e}")
-        return "" # Return empty on processing failure
+        return "", None # Return empty on processing failure
         
     finally:
         # 6. Cleanup OSS
@@ -123,19 +334,19 @@ def _process_pdf(file_path: Path) -> str:
             except Exception as e:
                 print(f"Warning: Failed to delete temp file from OSS: {e}")
 
-def extract_text(file_path: Path, file_type: FileType) -> str:
-    """Extract text from file using appropriate method."""
+def extract_text(file_path: Path, file_type: FileType) -> tuple[str, Path | None]:
+    """Extract text from file using appropriate method. Returns (content, image_root)."""
     if not client:
         print("Error: DASHSCOPE_API_KEY not set.")
-        return ""
+        return "", None
 
     if file_type == FileType.TEXT:
         try:
             with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
-                return f.read()
+                return f.read(), None
         except Exception as e:
             print(f"Error reading text file {file_path}: {e}")
-            return ""
+            return "", None
             
     elif file_type == FileType.IMAGE:
         # Use qwen-vl-max to describe image
@@ -169,34 +380,39 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
                     }
                 ]
             )
-            return response.choices[0].message.content
+            return response.choices[0].message.content, None
         except Exception as e:
             print(f"Error processing image {file_path}: {e}")
-            return ""
+            return "", None
             
     elif file_type == FileType.AUDIO:
         # Placeholder for audio transcription
-        # DashScope has audio models (Paraformer), but sticking to text/vision for now as requested
-        return "[Audio file - transcription not implemented]"
+        return "[Audio file - transcription not implemented]", None
         
     elif file_type == FileType.PDF:
         return _process_pdf(file_path)
     
-    return ""
+    return "", None
 
 import concurrent.futures
 import time
 
-def _generate_single_embedding(chunk, index, total):
+def _generate_single_embedding(chunk_input, index, total):
     """Helper function to generate embedding for a single chunk."""
     if total > 1 and (index+1) % 5 == 0:
         print(f"Embedding chunk {index+1}/{total}...")
         
     try:
+        # Construct input based on type
+        # If chunk_input is str, wrap it. If it's list, use as is.
+        final_input = chunk_input
+        if isinstance(chunk_input, str):
+            final_input = [{"text": chunk_input}]
+            
         # Use qwen3-vl-embedding via DashScope SDK
         resp = dashscope.MultiModalEmbedding.call(
             model=EMBEDDING_MODEL,
-            input=[{"text": chunk}]
+            input=final_input
         )
         
         if resp.status_code == 200:
@@ -216,7 +432,7 @@ def _generate_single_embedding(chunk, index, total):
                         embedding = embedding_item.get('embedding')
                     
                     if embedding:
-                        return chunk, embedding
+                        return chunk_input, embedding
         else:
             print(f"Error generating embedding for chunk {index}: {resp.code} - {resp.message}")
             
@@ -225,11 +441,11 @@ def _generate_single_embedding(chunk, index, total):
         
     return None, None
 
-def generate_embedding_chunks(text: str):
+def generate_embedding_chunks(text: str, image_root: Path = None):
     """
     Generate embeddings for text using qwen3-vl-embedding.
     Splits text into chunks and returns (chunks, embeddings_list).
-    Uses parallel processing to speed up generation.
+    If image_root is provided, uses multimodal splitting.
     """
     if not text:
         return [], []
@@ -238,8 +454,18 @@ def generate_embedding_chunks(text: str):
         print("Error: DASHSCOPE_API_KEY not set.")
         return [], []
 
-    # Use recursive splitter
-    chunks = recursive_character_text_splitter(text, chunk_size=1500, chunk_overlap=200)
+    chunks = []
+    inputs = []
+
+    if image_root:
+        # Multimodal splitting
+        print("Using Multimodal Splitter...")
+        chunks, inputs = markdown_multimodal_splitter(text, image_root)
+    else:
+        # Use recursive splitter
+        chunks = recursive_character_text_splitter(text, chunk_size=1500, chunk_overlap=200)
+        inputs = chunks # Inputs are just strings
+        
     total_chunks = len(chunks)
     print(f"Split into {total_chunks} chunks. Starting parallel embedding generation...")
     
@@ -261,8 +487,12 @@ def generate_embedding_chunks(text: str):
             batch_futures = {}
             
             for j in range(i, batch_end):
-                chunk = chunks[j]
-                future = executor.submit(_generate_single_embedding, chunk, j, total_chunks)
+                chunk_inp = inputs[j]
+                # Pass the chunk content for storage reference? 
+                # _generate_single_embedding returns (chunk_input, embedding)
+                # We need to map back to 'chunks' (the text content)
+                # Let's just trust the index.
+                future = executor.submit(_generate_single_embedding, chunk_inp, j, total_chunks)
                 batch_futures[future] = j
             
             # Wait for current batch to complete
@@ -270,8 +500,8 @@ def generate_embedding_chunks(text: str):
                 index = batch_futures[future]
                 try:
                     chunk_res, embedding_res = future.result()
-                    if chunk_res and embedding_res:
-                        results[index] = (chunk_res, embedding_res)
+                    if embedding_res: # We only care if embedding succeeded
+                        results[index] = (chunks[index], embedding_res)
                 except Exception as exc:
                     print(f"Chunk {index} generated an exception: {exc}")
             

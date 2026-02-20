@@ -5,7 +5,7 @@ from personal_brain.core.models import File, FileType, FileStatus
 from personal_brain.utils.file_ops import calculate_file_id, get_file_type, organize_file
 from personal_brain.core.indexer import extract_text, generate_embedding_chunks, generate_embedding
 from personal_brain.core.cleaner import calculate_trash_score
-from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding
+from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding, get_db_connection
 
 def process_file(file_path: Path):
     """Process a single file."""
@@ -41,7 +41,7 @@ def process_file(file_path: Path):
         
         # 5. Extract text
         print(f"Extracting text from {file_obj.filename}...")
-        text = extract_text(stored_path, file_type)
+        text, image_root = extract_text(stored_path, file_type)
         file_obj.ocr_text = text
         
         # 6. Calculate trash score
@@ -55,7 +55,7 @@ def process_file(file_path: Path):
         # Only embed if it has text and is not absolute trash
         if text and file_obj.trash_score > 0.2:
             print("Generating embedding chunks...")
-            chunks, embeddings = generate_embedding_chunks(text)
+            chunks, embeddings = generate_embedding_chunks(text, image_root)
             if chunks and embeddings:
                 save_chunks(file_id, chunks, embeddings)
                 
@@ -85,7 +85,7 @@ def refresh_index_for_file(file_id: str):
         
         # 1. Re-extract text
         file_type = get_file_type(file_path)
-        text = extract_text(file_path, file_type)
+        text, image_root = extract_text(file_path, file_type)
         
         # Check if text extraction failed
         if not text and file_type == FileType.PDF:
@@ -93,14 +93,12 @@ def refresh_index_for_file(file_id: str):
             return False
 
         # 2. Update DB record with new text
-        conn = get_file.__globals__['get_db_connection']()
+        conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Calculate trash score
+        # Calculate trash score (Dummy for now, or fetch logic)
         trash_score = 0.5 
-        if hasattr(calculate_trash_score, '__call__'):
-             pass
-
+        
         cursor.execute("UPDATE files SET ocr_text = ?, trash_score = ? WHERE id = ?", (text, trash_score, file_id))
         conn.commit()
         conn.close()
@@ -108,7 +106,7 @@ def refresh_index_for_file(file_id: str):
         # 3. Regenerate chunks and embeddings
         if text:
             print("Regenerating embedding chunks...")
-            chunks, embeddings = generate_embedding_chunks(text)
+            chunks, embeddings = generate_embedding_chunks(text, image_root)
             if chunks and embeddings:
                 save_chunks(file_id, chunks, embeddings)
                 
