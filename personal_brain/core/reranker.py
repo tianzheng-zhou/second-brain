@@ -19,7 +19,17 @@ def rerank_documents(query: str, documents: List[str], top_n: int = None) -> Lis
     """
     if not documents:
         return []
-        
+
+    # Truncate documents to avoid token limit (qwen3-vl-rerank has ~8k limit)
+    # Using simple character truncation as proxy (8000 chars is safe enough)
+    MAX_DOC_LEN = 8000
+    truncated_docs = []
+    for doc in documents:
+        if len(doc) > MAX_DOC_LEN:
+            truncated_docs.append(doc[:MAX_DOC_LEN])
+        else:
+            truncated_docs.append(doc)
+            
     # Ensure API key is set
     api_key = os.environ.get("DASHSCOPE_API_KEY") or DASHSCOPE_API_KEY
     if not api_key:
@@ -39,7 +49,7 @@ def rerank_documents(query: str, documents: List[str], top_n: int = None) -> Lis
             "model": RERANK_MODEL,
             "input": {
                 "query": query,
-                "documents": documents
+                "documents": truncated_docs
             },
             "parameters": {
                 "return_documents": True
@@ -65,7 +75,7 @@ def rerank_documents(query: str, documents: List[str], top_n: int = None) -> Lis
                     reranked.append({
                         "index": idx,
                         "relevance_score": score,
-                        "document": documents[idx]
+                        "document": documents[idx] # Use original document content, not truncated
                     })
                 return reranked
             else:

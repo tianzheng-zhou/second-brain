@@ -184,82 +184,75 @@ def extract_text(file_path: Path, file_type: FileType) -> str:
     
     return ""
 
-def generate_embedding(text: str):
+def generate_embedding_chunks(text: str):
     """
-    Generate embedding for text using qwen3-vl-embedding.
-    If text is too long, splits it into chunks and returns the average embedding (or list of embeddings).
-    Current DB schema supports one embedding per file, so we average them for now.
-    TODO: Support multiple chunks per file in DB.
+    Generate embeddings for text using qwen3-vl-embedding.
+    Splits text into chunks and returns (chunks, embeddings_list).
     """
     if not text:
-        return None
+        return [], []
         
     if not dashscope.api_key:
         print("Error: DASHSCOPE_API_KEY not set.")
-        return None
+        return [], []
 
-    # Split text if too long (approx check, model limit is tokens but chars is proxy)
-    # qwen3-vl-embedding context length is large, but API might have limits or latency issues
-    # Let's split if > 2000 chars to be safe and avoid "InternalError.Algo"
-    MAX_CHARS = 2000
-    chunks = [text]
-    if len(text) > MAX_CHARS:
-        print(f"Text length {len(text)} > {MAX_CHARS}, splitting...")
-        # Use simple chunking with list slicing which is fast
-        chunks = [text[i:i+MAX_CHARS] for i in range(0, len(text), MAX_CHARS)]
-        print(f"Split into {len(chunks)} chunks.")
+    # Use recursive splitter
+    chunks = recursive_character_text_splitter(text, chunk_size=1500, chunk_overlap=200)
+    print(f"Split into {len(chunks)} chunks.")
     
-    all_embeddings = []
+    valid_chunks = []
+    embeddings = []
     total_chunks = len(chunks)
     
     for i, chunk in enumerate(chunks):
-        if total_chunks > 1:
-            print(f"Processing chunk {i+1}/{total_chunks}...")
+        if total_chunks > 1 and (i+1) % 5 == 0:
+            print(f"Embedding chunk {i+1}/{total_chunks}...")
         try:
             # Use qwen3-vl-embedding via DashScope SDK
-            # Input format for multimodal embedding: input=[{"text": "..."}]
             resp = dashscope.MultiModalEmbedding.call(
                 model=EMBEDDING_MODEL,
-                input=[{"text": chunk}],
-                # User requested using largest dimension (default 2560 for qwen3-vl-embedding)
-                # parameters={"dimension": EMBEDDING_DIMENSION} # If needed, but user said default is 2560
+                input=[{"text": chunk}]
             )
             
             if resp.status_code == 200:
-                # Check response structure
-                # Handle both attribute access and dict access
                 output = getattr(resp, 'output', None)
                 if output is None and isinstance(resp, dict):
                     output = resp.get('output')
                 
                 if output:
-                    embeddings = getattr(output, 'embeddings', None)
-                    if embeddings is None and isinstance(output, dict):
-                        embeddings = output.get('embeddings')
+                    embeddings_data = getattr(output, 'embeddings', None)
+                    if embeddings_data is None and isinstance(output, dict):
+                        embeddings_data = output.get('embeddings')
                     
-                    if embeddings and len(embeddings) > 0:
-                        embedding_item = embeddings[0]
+                    if embeddings_data and len(embeddings_data) > 0:
+                        embedding_item = embeddings_data[0]
                         embedding = getattr(embedding_item, 'embedding', None)
                         if embedding is None and isinstance(embedding_item, dict):
                             embedding = embedding_item.get('embedding')
                         
                         if embedding:
-                            all_embeddings.append(embedding)
+                            valid_chunks.append(chunk)
+                            embeddings.append(embedding)
             else:
                 print(f"Error generating embedding for chunk {i}: {resp.code} - {resp.message}")
                 
         except Exception as e:
             print(f"Error generating embedding for chunk {i}: {e}")
             
-    if not all_embeddings:
+    return valid_chunks, embeddings
+
+def generate_embedding(text: str):
+    """
+    Legacy wrapper for single embedding generation (averaged).
+    Deprecated but kept for compatibility.
+    """
+    chunks, embeddings = generate_embedding_chunks(text)
+    if not embeddings:
         return None
-        
-    # If single chunk, return it
-    if len(all_embeddings) == 1:
-        return all_embeddings[0]
-        
-    # If multiple chunks, compute average (Mean Pooling)
-    # This is a temporary solution until DB supports multiple chunks
-    print(f"Averaging {len(all_embeddings)} embeddings...")
-    avg_embedding = [sum(x) / len(all_embeddings) for x in zip(*all_embeddings)]
+    if len(embeddings) == 1:
+        return embeddings[0]
+    
+    # Average pooling for legacy support
+    print(f"Averaging {len(embeddings)} embeddings (Legacy Mode)...")
+    avg_embedding = [sum(x) / len(embeddings) for x in zip(*embeddings)]
     return avg_embedding

@@ -3,9 +3,9 @@ from pathlib import Path
 from datetime import datetime
 from personal_brain.core.models import File, FileType, FileStatus
 from personal_brain.utils.file_ops import calculate_file_id, get_file_type, organize_file
-from personal_brain.core.indexer import extract_text, generate_embedding
+from personal_brain.core.indexer import extract_text, generate_embedding_chunks, generate_embedding
 from personal_brain.core.cleaner import calculate_trash_score
-from personal_brain.core.database import save_file, save_embedding, get_file
+from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding
 
 def process_file(file_path: Path):
     """Process a single file."""
@@ -22,10 +22,6 @@ def process_file(file_path: Path):
             return
         
         # 3. Organize file (Move/Copy to storage)
-        # Note: organize_file copies the file. 
-        # If the user wants to move, we might need an option.
-        # PRD says "inbox". Usually inbox means move.
-        # But for safety, copy first. 
         stored_path = organize_file(file_path, file_id)
         
         # 4. Create File object
@@ -55,21 +51,19 @@ def process_file(file_path: Path):
         # 7. Save file metadata
         save_file(file_obj)
         
-        # 8. Generate and save embedding
+        # 8. Generate and save embedding chunks
         # Only embed if it has text and is not absolute trash
         if text and file_obj.trash_score > 0.2:
-            print("Generating embedding...")
-            embedding = generate_embedding(text)
-            if embedding:
-                save_embedding(file_id, embedding)
+            print("Generating embedding chunks...")
+            chunks, embeddings = generate_embedding_chunks(text)
+            if chunks and embeddings:
+                save_chunks(file_id, chunks, embeddings)
                 
         print(f"Ingestion complete for {file_obj.filename}")
         
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
         # Mark as failed in DB if possible, or just log
-        # For now, we rely on logs. 
-        # But we could save the file record with status=FAILED or similar if we had that status.
 
 def refresh_index_for_file(file_id: str):
     """
@@ -91,10 +85,9 @@ def refresh_index_for_file(file_id: str):
         
         # 1. Re-extract text
         file_type = get_file_type(file_path)
-        # Assuming extract_text is imported
         text = extract_text(file_path, file_type)
         
-        # Check if text extraction failed (empty string for PDF usually means failure in our updated logic)
+        # Check if text extraction failed
         if not text and file_type == FileType.PDF:
             print(f"Text extraction failed for {file_path.name}. Aborting refresh.")
             return False
@@ -103,23 +96,21 @@ def refresh_index_for_file(file_id: str):
         conn = get_file.__globals__['get_db_connection']()
         cursor = conn.cursor()
         
-        # Calculate trash score (simple logic or use imported func)
+        # Calculate trash score
         trash_score = 0.5 
         if hasattr(calculate_trash_score, '__call__'):
-             # Create dummy object for trash score calculation if needed, 
-             # but for now let's just use simple update.
              pass
 
         cursor.execute("UPDATE files SET ocr_text = ?, trash_score = ? WHERE id = ?", (text, trash_score, file_id))
         conn.commit()
         conn.close()
         
-        # 3. Regenerate embedding
+        # 3. Regenerate chunks and embeddings
         if text:
-            print("Regenerating embedding...")
-            embedding = generate_embedding(text)
-            if embedding:
-                save_embedding(file_id, embedding)
+            print("Regenerating embedding chunks...")
+            chunks, embeddings = generate_embedding_chunks(text)
+            if chunks and embeddings:
+                save_chunks(file_id, chunks, embeddings)
                 
         print(f"Refresh complete for {file_path.name}")
         return True

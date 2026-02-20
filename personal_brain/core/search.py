@@ -45,49 +45,78 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
         
         results = cursor.fetchall()
         
-        files = []
+        candidates = []
         for row in results:
             rowid = row['rowid']
             distance = row['distance']
             
-            # Get file_id from mapping
+            # 1. Try to map via chunk_embeddings (New Chunk Logic)
+            cursor.execute("""
+                SELECT fc.content, fc.file_id, fc.chunk_index, f.filename, f.type
+                FROM chunk_embeddings ce
+                JOIN file_chunks fc ON ce.chunk_id = fc.id
+                JOIN files f ON fc.file_id = f.id
+                WHERE ce.rowid = ?
+            """, (rowid,))
+            chunk_data = cursor.fetchone()
+            
+            if chunk_data:
+                candidates.append({
+                    'type': 'chunk',
+                    'content': chunk_data['content'],
+                    'file_id': chunk_data['file_id'],
+                    'filename': chunk_data['filename'],
+                    'file_type': chunk_data['type'],
+                    'distance': distance
+                })
+                continue
+                
+            # 2. Fallback to old file_embeddings (Legacy Logic)
             cursor.execute("SELECT file_id FROM file_embeddings WHERE rowid = ?", (rowid,))
             mapping = cursor.fetchone()
             if mapping:
                 file_id = mapping['file_id']
-                # Get file details
                 cursor.execute("SELECT * FROM files WHERE id = ?", (file_id,))
                 file_row = cursor.fetchone()
                 if file_row:
                     file_data = dict(file_row)
-                    file_data['distance'] = distance
-                    files.append(file_data)
+                    candidates.append({
+                        'type': 'file',
+                        'content': file_data.get('ocr_text') or "",
+                        'file_id': file_data['id'],
+                        'filename': file_data['filename'],
+                        'file_type': file_data['type'],
+                        'distance': distance
+                    })
                     
         # Apply Reranking
-        if use_rerank and files:
-            print(f"Reranking {len(files)} candidates...")
+        if use_rerank and candidates:
+            print(f"Reranking {len(candidates)} candidates...")
             # Extract texts for reranking
-            # Prefer ocr_text, fallback to filename
-            documents = [f.get('ocr_text') or f.get('filename') or "" for f in files]
+            documents = [c.get('content') or "" for c in candidates]
             
             # Call reranker
             reranked_results = rerank_documents(query, documents, top_n=limit)
             
             if reranked_results:
-                final_files = []
+                final_results = []
                 for item in reranked_results:
                     original_idx = item['index']
-                    file_data = files[original_idx]
-                    # Update score with rerank score
-                    file_data['rerank_score'] = item['relevance_score']
-                    # Keep original distance for reference
-                    final_files.append(file_data)
-                return final_files
+                    candidate = candidates[original_idx]
+                    # Update score with rerank score (higher is better)
+                    candidate['score'] = item['relevance_score']
+                    final_results.append(candidate)
+                return final_results
             else:
-                # If rerank fails, fallback to original top N
-                return files[:limit]
+                # If rerank fails, fallback
+                return candidates[:limit]
         
-        return files[:limit]
+        # If no rerank, normalize distance to score (lower distance is better, so invert or just return)
+        # For consistency with rerank score (higher better), let's just return distance as is for now
+        for c in candidates:
+            c['score'] = 1.0 / (1.0 + c['distance']) # Simple conversion
+            
+        return candidates[:limit]
         
     except Exception as e:
         print(f"Search error: {e}")

@@ -66,11 +66,32 @@ def init_db():
         print(f"Warning: Could not create vector table. Vector search will be disabled. Error: {e}")
 
     # Mapping table for vector search (rowid <-> file_id)
+    # DEPRECATED for new chunks, but kept for compatibility or cleanup
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS file_embeddings (
             rowid INTEGER PRIMARY KEY,
             file_id TEXT,
             FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+        )
+    """)
+
+    # File Chunks table (New)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS file_chunks (
+            id TEXT PRIMARY KEY,
+            file_id TEXT,
+            chunk_index INTEGER,
+            content TEXT,
+            FOREIGN KEY(file_id) REFERENCES files(id) ON DELETE CASCADE
+        )
+    """)
+
+    # Chunk Embeddings mapping table (New)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chunk_embeddings (
+            rowid INTEGER PRIMARY KEY,
+            chunk_id TEXT,
+            FOREIGN KEY(chunk_id) REFERENCES file_chunks(id) ON DELETE CASCADE
         )
     """)
 
@@ -104,6 +125,61 @@ def init_db():
     conn.commit()
     conn.close()
     # print(f"Database initialized at {DB_PATH}")
+
+def save_chunks(file_id: str, chunks: list[str], embeddings: list[list[float]]):
+    """
+    Save multiple chunks and their embeddings for a file.
+    """
+    if not chunks or not embeddings or len(chunks) != len(embeddings):
+        print(f"Error: Mismatch in chunks ({len(chunks)}) and embeddings ({len(embeddings)})")
+        return
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    try:
+        # First, delete existing chunks for this file (full refresh)
+        # Find existing chunk ids
+        cursor.execute("SELECT id FROM file_chunks WHERE file_id = ?", (file_id,))
+        existing_chunk_ids = [row['id'] for row in cursor.fetchall()]
+        
+        # Delete from chunk_embeddings (and implicitly vec_items via rowid lookup)
+        for chunk_id in existing_chunk_ids:
+            cursor.execute("SELECT rowid FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+            row = cursor.fetchone()
+            if row:
+                cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (row['rowid'],))
+            cursor.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+            
+        # Delete from file_chunks
+        cursor.execute("DELETE FROM file_chunks WHERE file_id = ?", (file_id,))
+        
+        # Insert new chunks
+        for i, (text, embedding) in enumerate(zip(chunks, embeddings)):
+            chunk_id = f"{file_id}_{i}"
+            
+            # 1. Insert into file_chunks
+            cursor.execute("""
+                INSERT INTO file_chunks (id, file_id, chunk_index, content)
+                VALUES (?, ?, ?, ?)
+            """, (chunk_id, file_id, i, text))
+            
+            # 2. Insert embedding into vec_items
+            embedding_bytes = struct.pack(f'<{len(embedding)}f', *embedding)
+            cursor.execute("INSERT INTO vec_items(embedding) VALUES (?)", (embedding_bytes,))
+            rowid = cursor.lastrowid
+            
+            # 3. Map rowid to chunk_id
+            cursor.execute("INSERT INTO chunk_embeddings (rowid, chunk_id) VALUES (?, ?)", (rowid, chunk_id))
+            
+        conn.commit()
+        print(f"Saved {len(chunks)} chunks for file {file_id}")
+        
+    except Exception as e:
+        print(f"Error saving chunks: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
 
 def save_file(file):
     conn = get_db_connection()
