@@ -8,11 +8,10 @@ from openai import OpenAI
 from personal_brain.config import (
     DASHSCOPE_API_KEY, 
     DASHSCOPE_BASE_URL, 
-    EMBEDDING_MODEL, 
     EMBEDDING_DIMENSION,
-    VISION_MODEL,
     STORAGE_PATH
 )
+from personal_brain.core.config_manager import config_manager
 from personal_brain.core.models import FileType
 from personal_brain.utils.aliyun_oss import AliyunOSS
 from personal_brain.utils.mineru import MinerUClient
@@ -364,7 +363,7 @@ def extract_text(file_path: Path, file_type: FileType) -> tuple[str, Path | None
                 mime_type = "image/gif"
                 
             response = client.chat.completions.create(
-                model=VISION_MODEL,
+                model=config_manager.get("vision_model"),
                 messages=[
                     {
                         "role": "user",
@@ -411,7 +410,7 @@ def _generate_single_embedding(chunk_input, index, total):
             
         # Use qwen3-vl-embedding via DashScope SDK
         resp = dashscope.MultiModalEmbedding.call(
-            model=EMBEDDING_MODEL,
+            model=config_manager.get("embedding_model"),
             input=final_input
         )
         

@@ -3,11 +3,9 @@ import sys
 from openai import OpenAI
 from personal_brain.config import (
     DASHSCOPE_API_KEY, 
-    DASHSCOPE_BASE_URL, 
-    EMBEDDING_MODEL, 
-    VISION_MODEL,
-    CHAT_MODEL
+    DASHSCOPE_BASE_URL
 )
+from personal_brain.core.config_manager import config_manager
 
 def check_dashscope():
     print(f"Checking DashScope configuration...")
@@ -23,11 +21,15 @@ def check_dashscope():
         base_url=DASHSCOPE_BASE_URL
     )
 
+    chat_model = config_manager.get("chat_model")
+    embedding_model = config_manager.get("embedding_model")
+    vision_model = config_manager.get("vision_model")
+
     try:
         # Simple chat completion test
-        print(f"Testing connection with {CHAT_MODEL}...")
+        print(f"Testing connection with {chat_model}...")
         completion = client.chat.completions.create(
-            model=CHAT_MODEL,
+            model=chat_model,
             messages=[
                 {"role": "user", "content": "Hello, are you working?"}
             ]
@@ -36,9 +38,9 @@ def check_dashscope():
         print(f"Response: {completion.choices[0].message.content}")
         
         # Test embedding
-        print(f"\nTesting embedding with {EMBEDDING_MODEL}...")
+        print(f"\nTesting embedding with {embedding_model}...")
         res = client.embeddings.create(
-            model=EMBEDDING_MODEL,
+            model=embedding_model,
             input="Test embedding",
             dimensions=1024
         )
@@ -46,9 +48,9 @@ def check_dashscope():
         print(f"✅ Embedding generated. Dimension: {len(emb)}")
 
         print(f"\nConfiguration summary:")
-        print(f"  - Chat Model: {CHAT_MODEL}")
-        print(f"  - Embedding Model: {EMBEDDING_MODEL}")
-        print(f"  - Vision Model: {VISION_MODEL}")
+        print(f"  - Chat Model: {chat_model}")
+        print(f"  - Embedding Model: {embedding_model}")
+        print(f"  - Vision Model: {vision_model}")
         
     except Exception as e:
         print(f"❌ Error connecting to DashScope: {e}")

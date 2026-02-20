@@ -2,9 +2,9 @@ import os
 from openai import OpenAI
 from personal_brain.config import (
     DASHSCOPE_API_KEY, 
-    DASHSCOPE_BASE_URL, 
-    CHAT_MODEL
+    DASHSCOPE_BASE_URL
 )
+from personal_brain.core.config_manager import config_manager
 from personal_brain.core.search import search_files
 
 def get_client():
@@ -97,8 +97,9 @@ Current Date: {os.getenv('TODAY_DATE', 'Unknown')}
 
     # 3. Call LLM
     try:
+        chat_model = config_manager.get("chat_model")
         response = client.chat.completions.create(
-            model=CHAT_MODEL,
+            model=chat_model,
             messages=messages,
             stream=stream,
             temperature=0.7,

@@ -11,6 +11,7 @@ from personal_brain.core.database import (
     get_file_chunks
 )
 from personal_brain.config import ensure_dirs, STORAGE_PATH, DB_PATH
+from personal_brain.core.config_manager import config_manager
 from personal_brain.core.ingestion import ingest_path, refresh_index_for_file
 from personal_brain.core.search import search_files
 
@@ -59,11 +60,46 @@ with st.sidebar:
     st.title("Admin Console")
     st.markdown("Database Management")
     
-    menu = st.radio(
-        "Navigation", 
-        ["Dashboard", "Knowledge Base", "Vector Search", "Settings"],
-        index=0,
-    )
+    # Custom styling for buttons to make them look like chat topics
+    st.markdown("""
+        <style>
+            div[data-testid="stSidebar"] button {
+                width: 100%;
+                text-align: left;
+                padding-left: 20px;
+                border: none;
+                margin-bottom: 5px;
+            }
+            div[data-testid="stSidebar"] button:focus {
+                border: none;
+                outline: none;
+            }
+        </style>
+    """, unsafe_allow_html=True)
+
+    # Initialize session state for page navigation
+    if 'current_page' not in st.session_state:
+        st.session_state['current_page'] = "Dashboard"
+
+    # Navigation items
+    nav_items = {
+        "Dashboard": "📊",
+        "Knowledge Base": "📂",
+        "Vector Search": "🔍",
+        "Settings": "⚙️"
+    }
+
+    # Render navigation buttons
+    for page_name, icon in nav_items.items():
+        is_active = st.session_state['current_page'] == page_name
+        # Use primary type for active page, secondary for others
+        btn_type = "primary" if is_active else "secondary"
+        
+        if st.button(f"{icon}  {page_name}", key=f"nav_{page_name}", type=btn_type, use_container_width=True):
+            st.session_state['current_page'] = page_name
+            st.rerun()
+            
+    menu = st.session_state['current_page']
     
     st.markdown("---")
     status = "Active" if os.path.exists(DB_PATH) else "Offline"
@@ -144,6 +180,36 @@ elif menu == "Knowledge Base":
             
             if search_term:
                 if use_ai_search:
+                    with st.spinner("AI is optimizing your search query..."):
+                        try:
+                            # Use configured AI Search Model to optimize the query
+                            from openai import OpenAI
+                            from personal_brain.config import DASHSCOPE_API_KEY, DASHSCOPE_BASE_URL
+                            from personal_brain.core.config_manager import config_manager
+                            
+                            ai_client = OpenAI(
+                                api_key=DASHSCOPE_API_KEY,
+                                base_url=DASHSCOPE_BASE_URL
+                            )
+                            
+                            ai_model = config_manager.get("ai_search_model", "qwen-plus")
+                            
+                            response = ai_client.chat.completions.create(
+                                model=ai_model,
+                                messages=[
+                                    {"role": "system", "content": "You are a search query optimizer. Your task is to extract keywords and expand the user's search query to improve retrieval accuracy. Output ONLY the optimized query string, no other text."},
+                                    {"role": "user", "content": f"Optimize this search query: {search_term}"}
+                                ],
+                                temperature=0.3
+                            )
+                            optimized_query = response.choices[0].message.content.strip()
+                            st.caption(f"Original: '{search_term}' -> Optimized: '{optimized_query}' (Model: {ai_model})")
+                            search_term = optimized_query
+                            
+                        except Exception as e:
+                            st.error(f"AI Optimization failed: {e}")
+                            # Fallback to original term
+                            
                     with st.spinner("Searching knowledge base..."):
                         # Use vector search to find relevant chunks/files
                         # Increase limit to cast a wider net
@@ -216,16 +282,24 @@ elif menu == "Knowledge Base":
                             st.session_state['view_file_id'] = row['id']
                             st.rerun()
                     with b2:
-                        if st.button("🔄", key=f"refresh_{row['id']}", help="Re-index"):
-                            with st.spinner("Re-indexing..."):
-                                refresh_index_for_file(row['id'])
-                                st.toast(f"Refreshed {row['filename']}")
+                        with st.popover("🔄", help="Re-index"):
+                            st.write("⚠️ **Confirm Re-index?**")
+                            st.caption("This will consume tokens and overwrite existing embeddings.")
+                            if st.button("Yes, Re-index", key=f"confirm_refresh_{row['id']}", type="primary"):
+                                with st.spinner("Re-indexing..."):
+                                    refresh_index_for_file(row['id'])
+                                    st.toast(f"Refreshed {row['filename']}")
+                                    time.sleep(1)
+                                    st.rerun()
                     with b3:
-                        if st.button("🗑️", key=f"del_{row['id']}", help="Delete"):
-                            delete_file_record(row['id'])
-                            st.toast(f"Deleted {row['filename']}")
-                            time.sleep(0.5)
-                            st.rerun()
+                        with st.popover("🗑️", help="Delete"):
+                            st.write("⚠️ **Confirm Delete?**")
+                            st.caption("This action cannot be undone.")
+                            if st.button("Yes, Delete", key=f"confirm_del_{row['id']}", type="primary"):
+                                delete_file_record(row['id'])
+                                st.toast(f"Deleted {row['filename']}")
+                                time.sleep(1)
+                                st.rerun()
             
             st.markdown("---")
             
@@ -307,40 +381,205 @@ elif menu == "Vector Search":
                 
                 with st.expander(f"#{i+1} | Score: :{color}[{score:.4f}] | {res['filename']}"):
                     st.markdown(f"**Source File:** `{res['filename']}`")
-                    st.markdown("**Content Chunk:**")
-                    st.markdown(f"```text\n{res['content']}\n```")
+                    st.markdown(f"**Type:** `{res.get('file_type', 'unknown')}`")
+                    
+                    # Display content based on type
+                    content = res['content']
+                    
+                    # Check for image content in multimodal chunks
+                    # Our multimodal splitter stores images as base64 in the content or as separate metadata?
+                    # The current implementation stores text content in 'content' column.
+                    # If it's a multimodal chunk, the text might contain image references or the chunk itself is text description.
+                    
+                    # However, if the chunk comes from an image file (OCR/Description), we should show the image if possible.
+                    # We need the file path to show the image.
+                    # search_files returns file_id, we can look up the file path?
+                    # But search_files doesn't return file path currently.
+                    
+                    # Let's try to infer if it's an image file
+                    file_type = res.get('file_type', '').lower()
+                    if file_type in ['image', 'png', 'jpg', 'jpeg', 'webp', 'gif']:
+                        # Try to construct file path and show image
+                        from pathlib import Path
+                        # Assuming STORAGE_PATH is available
+                        # We need to know where the file is stored.
+                        # Usually in STORAGE_PATH or a subfolder if using ingestion logic.
+                        # Since we don't have the path in result, let's query DB for it?
+                        # Or just show the description.
+                        
+                        st.markdown("**Image Description / Text:**")
+                        st.info(content)
+                        
+                        # Attempt to show image if we can find it by filename in storage
+                        # This is a heuristic since we don't pass full path
+                        # Check root storage and uploads folder
+                        possible_paths = [
+                            STORAGE_PATH / res['filename'],
+                            STORAGE_PATH / "uploads" / res['filename']
+                        ]
+                        
+                        for p in possible_paths:
+                            if p.exists():
+                                st.image(str(p), caption=res['filename'], use_container_width=True)
+                                break
+                    else:
+                        # Text content
+                        st.markdown("**Content Chunk:**")
+                        
+                        # Try to find and render images embedded in markdown (e.g. from PDF processing)
+                        import re
+                        from pathlib import Path
+                        
+                        # Find all markdown images: ![alt](path)
+                        # The path in DB might be relative or absolute. 
+                        # MinerU usually outputs relative paths like "images/xxx.jpg"
+                        
+                        # We need to be careful not to break the layout if there are many images
+                        
+                        image_matches = re.findall(r'!\[(.*?)\]\((.*?)\)', content)
+                        
+                        if image_matches:
+                            # Render images found in text
+                            for alt, img_path in image_matches:
+                                # Clean path
+                                clean_path = img_path.lstrip('./').lstrip('/').replace('/', os.sep)
+                                
+                                # Try to resolve path
+                                # 1. Try relative to storage/mineru_cache (where PDFs are processed)
+                                # We don't know the exact subfolder from here easily without file hash
+                                # But we can try to search for the filename in STORAGE_PATH
+                                
+                                found_img = None
+                                img_name = Path(clean_path).name
+                                
+                                # Heuristic: search in mineru_cache
+                                cache_dir = STORAGE_PATH / "mineru_cache"
+                                if cache_dir.exists():
+                                    # Try to find the file recursively in cache_dir
+                                    # This might be slow if cache is huge, but usually okay for admin console
+                                    try:
+                                        found_imgs = list(cache_dir.rglob(img_name))
+                                        if found_imgs:
+                                            found_img = found_imgs[0]
+                                    except Exception:
+                                        pass
+                                
+                                if found_img:
+                                    st.image(str(found_img), caption=f"Image found in text: {alt}", use_container_width=True)
+                                else:
+                                    # If not found, maybe just display the text
+                                    pass
+                        
+                        st.markdown(f"```text\n{content}\n```")
 
 # --- SETTINGS ---
 elif menu == "Settings":
     st.markdown('<div class="main-header">System Settings</div>', unsafe_allow_html=True)
     
-    st.subheader("Database Configuration")
-    st.code(f"DB_PATH = {DB_PATH}", language="python")
-    st.code(f"STORAGE_PATH = {STORAGE_PATH}", language="python")
+    tab_model, tab_db = st.tabs(["🤖 Model Configuration", "🗄️ Database"])
     
-    st.markdown("---")
-    st.subheader("Maintenance")
-    
-    if st.button("Initialize / Repair Database"):
-        try:
-            ensure_dirs()
-            init_db()
-            st.success("Database structure initialized/repaired.")
-        except Exception as e:
-            st.error(f"Error: {e}")
-            
-    st.markdown("---")
-    st.subheader("Danger Zone")
-    if st.button("🗑️ WIPE DATABASE", type="primary"):
-        st.session_state['confirm_wipe'] = True
+    with tab_model:
+        st.subheader("Model Selection")
+        st.markdown("Configure the AI models used for different tasks.")
         
-    if st.session_state.get('confirm_wipe'):
-        st.warning("⚠️ This will verify delete ALL files and embeddings! Are you sure?")
-        if st.button("YES, DELETE EVERYTHING"):
-            if os.path.exists(DB_PATH):
-                os.remove(DB_PATH)
-            init_db()
-            st.success("Database wiped clean.")
-            st.session_state['confirm_wipe'] = False
-            time.sleep(1)
-            st.rerun()
+        # Load current config
+        current_config = config_manager.get_all()
+        
+        # Define available options
+        chat_options = ["qwen3-max", "qwen-plus", "qwen-flash", "qwen3.5-plus"]
+        vision_options = ["qwen3-vl-plus", "qwen3-vl-flash", "qwen3.5-plus"]
+        
+        # Ensure current config values are in options or use default
+        current_chat_model = current_config.get("chat_model")
+        if current_chat_model not in chat_options:
+            current_chat_model = chat_options[0]
+            
+        current_vision_model = current_config.get("vision_model")
+        if current_vision_model not in vision_options:
+            current_vision_model = vision_options[0]
+            
+        current_ai_search_model = current_config.get("ai_search_model")
+        if current_ai_search_model not in chat_options:
+            current_ai_search_model = chat_options[0]
+
+        with st.form("model_config_form"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                new_chat_model = st.selectbox(
+                    "Chat Model (General Conversation)",
+                    options=chat_options,
+                    index=chat_options.index(current_chat_model),
+                    help="Used for answering user queries and general conversation."
+                )
+                
+                new_ai_search_model = st.selectbox(
+                    "AI Search Model (Query Optimization)",
+                    options=chat_options,
+                    index=chat_options.index(current_ai_search_model),
+                    help="Used to optimize search queries in the Admin Console AI Search."
+                )
+                
+                new_vision_model = st.selectbox(
+                    "Vision Model (Image Understanding)",
+                    options=vision_options,
+                    index=vision_options.index(current_vision_model),
+                    help="Used for analyzing images in uploaded files."
+                )
+                
+            with col2:
+                st.text_input(
+                    "Embedding Model (Read-only)",
+                    value=current_config.get("embedding_model"),
+                    disabled=True,
+                    help="Currently fixed to ensure index compatibility."
+                )
+                
+                st.text_input(
+                    "Rerank Model (Read-only)",
+                    value=current_config.get("rerank_model"),
+                    disabled=True,
+                    help="Currently fixed to ensure search optimization."
+                )
+            
+            submitted = st.form_submit_button("Save Configuration", type="primary")
+            
+            if submitted:
+                config_manager.set("chat_model", new_chat_model)
+                config_manager.set("ai_search_model", new_ai_search_model)
+                config_manager.set("vision_model", new_vision_model)
+                st.success("Configuration saved successfully!")
+                time.sleep(1)
+                st.rerun()
+
+    with tab_db:
+        st.subheader("Database Configuration")
+        st.code(f"DB_PATH = {DB_PATH}", language="python")
+        st.code(f"STORAGE_PATH = {STORAGE_PATH}", language="python")
+        
+        st.markdown("---")
+        st.subheader("Maintenance")
+        
+        if st.button("Initialize / Repair Database"):
+            try:
+                ensure_dirs()
+                init_db()
+                st.success("Database structure initialized/repaired.")
+            except Exception as e:
+                st.error(f"Error: {e}")
+                
+        st.markdown("---")
+        st.subheader("Danger Zone")
+        if st.button("🗑️ WIPE DATABASE", type="primary"):
+            st.session_state['confirm_wipe'] = True
+            
+        if st.session_state.get('confirm_wipe'):
+            st.warning("⚠️ This will verify delete ALL files and embeddings! Are you sure?")
+            if st.button("YES, DELETE EVERYTHING"):
+                if os.path.exists(DB_PATH):
+                    os.remove(DB_PATH)
+                init_db()
+                st.success("Database wiped clean.")
+                st.session_state['confirm_wipe'] = False
+                time.sleep(1)
+                st.rerun()

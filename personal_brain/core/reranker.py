@@ -2,7 +2,8 @@ import os
 import requests
 from typing import List, Dict, Any
 # from dashscope import TextReRank # No longer using TextReRank class for qwen3-vl-rerank
-from personal_brain.config import RERANK_MODEL, DASHSCOPE_API_KEY
+from personal_brain.config import DASHSCOPE_API_KEY
+from personal_brain.core.config_manager import config_manager
 
 def rerank_documents(query: str, documents: List[str], top_n: int = None) -> List[Dict[str, Any]]:
     """
@@ -46,7 +47,7 @@ def rerank_documents(query: str, documents: List[str], top_n: int = None) -> Lis
         }
         
         payload = {
-            "model": RERANK_MODEL,
+            "model": config_manager.get("rerank_model"),
             "input": {
                 "query": query,
                 "documents": truncated_docs
