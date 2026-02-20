@@ -250,6 +250,22 @@ def get_all_files():
     finally:
         conn.close()
 
+def get_file_chunks(file_id: str):
+    """
+    Get all chunks for a specific file.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM file_chunks WHERE file_id = ? ORDER BY chunk_index ASC", (file_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching chunks for file {file_id}: {e}")
+        return []
+    finally:
+        conn.close()
+
 def get_db_schema():
     """
     Get the database schema (list of tables and their columns).
