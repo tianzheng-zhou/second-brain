@@ -1,12 +1,53 @@
+# Virtual Environment
 .venv/
+venv/
+env/
+
+# Python cache and compiled files
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 
-# Environment Variables
+# Environment Variables & Secrets
 .env
+.env.*
+!.env.example
 .streamlit/secrets.toml
+# .chainlit/config.toml should be committed as it contains app configuration. 
+# Ensure you do NOT put secrets in it (use .env instead).
 
 # Database and Storage
 data/
 brain.db
 *.db
+personal_brain_data/
+storage/
+uploads/
+mineru_cache/
+
+# Logs
+logs/
+*.log
+
+# IDE settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+htmlcov/
+coverage/
+.coverage
+
+# Temporary or Test files
+test_note.txt
+tmp/
+temp/

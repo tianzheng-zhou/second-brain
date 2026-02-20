@@ -244,10 +244,16 @@ async def main(message: cl.Message):
                 
                 # Append sources if available
                 if sources:
-                    source_text = "\n\n**📚 References:**\n"
-                    for i, src in enumerate(sources, 1):
-                        source_text += f"{i}. **{src['filename']}** (Score: {src['score']:.4f})\n"
-                    await msg.stream_token(source_text)
+                    # Create a separate step for references to make it collapsible (as a step)
+                    async with cl.Step(name="📚 References") as source_step:
+                        source_text = ""
+                        for i, src in enumerate(sources, 1):
+                            # Use small text
+                            source_text += f"{i}. {src['filename']} (Score: {src['score']:.4f})\n"
+                        
+                        source_step.output = source_text
+                    
+                    # Don't append to main message, just show the step
                     # Don't save sources text to history context, just the answer
                 
                 await msg.update()
