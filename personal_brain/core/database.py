@@ -122,6 +122,16 @@ def init_db():
         )
     """)
     
+    # Chat History table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS chat_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            role TEXT,
+            content TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
     conn.commit()
     conn.close()
     # print(f"Database initialized at {DB_PATH}")
@@ -268,30 +278,74 @@ def get_db_schema():
 def delete_file_record(file_id: str):
     """
     Delete a file record and its associated embeddings from the database.
+    Updated to handle both legacy (file_embeddings) and new (chunk_embeddings) schemas.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        # Get rowid from file_embeddings to delete from vec_items
+        # 1. Handle Legacy Schema
         cursor.execute("SELECT rowid FROM file_embeddings WHERE file_id = ?", (file_id,))
-        row = cursor.fetchone()
+        rows = cursor.fetchall()
+        for row in rows:
+            # Delete from vec_items
+            cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (row['rowid'],))
         
-        if row:
-            rowid = row['rowid']
-            # Delete from vec_items (virtual table)
-            # Note: vec0 usually handles deletion via rowid
-            cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (rowid,))
-            
-        # Delete from file_embeddings
         cursor.execute("DELETE FROM file_embeddings WHERE file_id = ?", (file_id,))
         
-        # Delete from files
+        # 2. Handle New Chunk Schema
+        # Find all chunks for this file
+        cursor.execute("SELECT id FROM file_chunks WHERE file_id = ?", (file_id,))
+        chunk_ids = [row['id'] for row in cursor.fetchall()]
+        
+        for chunk_id in chunk_ids:
+            # Find associated embeddings
+            cursor.execute("SELECT rowid FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+            emb_rows = cursor.fetchall()
+            for row in emb_rows:
+                # Delete from vec_items
+                cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (row['rowid'],))
+            
+            # Delete from chunk_embeddings
+            cursor.execute("DELETE FROM chunk_embeddings WHERE chunk_id = ?", (chunk_id,))
+            
+        # Delete from file_chunks
+        cursor.execute("DELETE FROM file_chunks WHERE file_id = ?", (file_id,))
+        
+        # 3. Delete from files table
         cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
         
         conn.commit()
+        print(f"Deleted file record {file_id}")
         return True
     except Exception as e:
         print(f"Error deleting file record {file_id}: {e}")
         return False
+    finally:
+        conn.close()
+
+def save_chat_message(role: str, content: str):
+    """Save a chat message to history."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("INSERT INTO chat_history (role, content) VALUES (?, ?)", (role, content))
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving chat message: {e}")
+    finally:
+        conn.close()
+
+def get_chat_history(limit: int = 50):
+    """Get recent chat history."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT role, content, timestamp FROM chat_history ORDER BY timestamp DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        # Reverse to return in chronological order
+        return [dict(row) for row in rows][::-1]
+    except Exception as e:
+        print(f"Error fetching chat history: {e}")
+        return []
     finally:
         conn.close()

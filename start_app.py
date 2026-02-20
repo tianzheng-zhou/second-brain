@@ -28,14 +28,21 @@ def main():
             # Relaunch script with venv python
             subprocess.run([str(python_executable), __file__] + sys.argv[1:])
             return
-    
+
     # If we are here, we are either in venv or venv not found/not used
-    print("Starting Streamlit app...")
+    # But check if we are in the main execution block or re-exec block
+    # Actually, the logic above is:
+    # 1. If NOT in venv, find venv python and re-run THIS script with it.
+    # 2. If IN venv (or venv not found), run the target app.
     
-    # Run streamlit run streamlit_app.py
-    streamlit_script = project_root / "streamlit_app.py"
+    # So below is the target app execution logic
+    print("Starting Chainlit app...")
     
-    cmd = [sys.executable, "-m", "streamlit", "run", str(streamlit_script)]
+    # Use chainlit module execution
+    # python -m chainlit run chainlit_app.py -w
+    target_script = project_root / "chainlit_app.py"
+    
+    cmd = [sys.executable, "-m", "chainlit", "run", str(target_script), "-w"]
     
     try:
         subprocess.run(cmd, check=True)
