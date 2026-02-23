@@ -14,3 +14,4 @@ python-dotenv
 dashscope
 uvicorn
 oss2
+dateparser

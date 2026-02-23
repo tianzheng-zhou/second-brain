@@ -131,6 +131,42 @@ def init_db():
             timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Entries table (New in v3)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entries (
+            id TEXT PRIMARY KEY,
+            content_text TEXT,
+            content_json TEXT,
+            entry_type TEXT,
+            created_at TIMESTAMP,
+            source TEXT,
+            tags TEXT,
+            importance REAL,
+            trash_score REAL,
+            status TEXT
+        )
+    """)
+
+    # Entry Files junction table
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entry_files (
+            entry_id TEXT,
+            file_id TEXT,
+            PRIMARY KEY (entry_id, file_id),
+            FOREIGN KEY(entry_id) REFERENCES entries(id),
+            FOREIGN KEY(file_id) REFERENCES files(id)
+        )
+    """)
+    
+    # Entry Embeddings table (for semantic search of entries)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS entry_embeddings (
+            rowid INTEGER PRIMARY KEY,
+            entry_id TEXT,
+            FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+        )
+    """)
     
     conn.commit()
     conn.close()
@@ -363,5 +399,120 @@ def get_chat_history(limit: int = 50):
     except Exception as e:
         print(f"Error fetching chat history: {e}")
         return []
+    finally:
+        conn.close()
+
+def save_entry(entry: dict):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Check if entry exists
+        cursor.execute("SELECT id FROM entries WHERE id = ?", (entry['id'],))
+        exists = cursor.fetchone()
+        
+        if exists:
+            # Update
+            cursor.execute("""
+                UPDATE entries SET
+                    content_text = ?, content_json = ?, entry_type = ?,
+                    created_at = ?, source = ?, tags = ?,
+                    importance = ?, trash_score = ?, status = ?
+                WHERE id = ?
+            """, (
+                entry.get('content_text'), entry.get('content_json'), entry.get('entry_type'),
+                entry.get('created_at'), entry.get('source'), entry.get('tags'),
+                entry.get('importance'), entry.get('trash_score'), entry.get('status'),
+                entry['id']
+            ))
+        else:
+            # Insert
+            cursor.execute("""
+                INSERT INTO entries (
+                    id, content_text, content_json, entry_type,
+                    created_at, source, tags, importance, trash_score, status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                entry['id'], entry.get('content_text'), entry.get('content_json'), entry.get('entry_type'),
+                entry.get('created_at'), entry.get('source'), entry.get('tags'),
+                entry.get('importance'), entry.get('trash_score'), entry.get('status')
+            ))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving entry {entry.get('id')}: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_entry(entry_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM entries WHERE id = ?", (entry_id,))
+        row = cursor.fetchone()
+        if row:
+            return dict(row)
+        return None
+    finally:
+        conn.close()
+
+def save_entry_embedding(entry_id: str, embedding: list):
+    if not embedding:
+        return
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # First clear old embeddings for this entry?
+        # Find rowids
+        cursor.execute("SELECT rowid FROM entry_embeddings WHERE entry_id = ?", (entry_id,))
+        rows = cursor.fetchall()
+        for row in rows:
+            cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (row['rowid'],))
+        cursor.execute("DELETE FROM entry_embeddings WHERE entry_id = ?", (entry_id,))
+
+        embedding_bytes = struct.pack(f'<{len(embedding)}f', *embedding)
+        cursor.execute("INSERT INTO vec_items(embedding) VALUES (?)", (embedding_bytes,))
+        rowid = cursor.lastrowid
+        cursor.execute("INSERT INTO entry_embeddings(rowid, entry_id) VALUES (?, ?)", (rowid, entry_id))
+        conn.commit()
+    except Exception as e:
+        print(f"Error saving entry embedding: {e}")
+    finally:
+        conn.close()
+
+def link_entry_files(entry_id: str, file_ids: list):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        for fid in file_ids:
+            cursor.execute("INSERT OR IGNORE INTO entry_files (entry_id, file_id) VALUES (?, ?)", (entry_id, fid))
+        conn.commit()
+    except Exception as e:
+        print(f"Error linking files to entry: {e}")
+    finally:
+        conn.close()
+
+def delete_entry_record(entry_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Delete embeddings
+        cursor.execute("SELECT rowid FROM entry_embeddings WHERE entry_id = ?", (entry_id,))
+        rows = cursor.fetchall()
+        for row in rows:
+            cursor.execute("DELETE FROM vec_items WHERE rowid = ?", (row['rowid'],))
+        cursor.execute("DELETE FROM entry_embeddings WHERE entry_id = ?", (entry_id,))
+        
+        # Delete file links
+        cursor.execute("DELETE FROM entry_files WHERE entry_id = ?", (entry_id,))
+        
+        # Delete entry
+        cursor.execute("DELETE FROM entries WHERE id = ?", (entry_id,))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error deleting entry {entry_id}: {e}")
+        return False
     finally:
         conn.close()

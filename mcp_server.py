@@ -73,8 +73,13 @@ async def ingest_content(path: str) -> str:
         return f"Error: Path {path} does not exist."
         
     try:
-        ingest_path(path)
-        return f"Successfully ingested content from {path}"
+        result = ingest_path(path)
+        if result["failed"] > 0:
+            return f"Ingestion finished with issues. Success: {result['success']}, Failed: {result['failed']}. Errors: {'; '.join(result['errors'][:3])}"
+        elif result["total"] == 0:
+            return "No files found to ingest."
+        else:
+            return f"Successfully ingested {result['success']} files from {path}"
     except Exception as e:
         return f"Error ingesting content: {e}"
 

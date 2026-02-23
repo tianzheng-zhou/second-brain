@@ -14,6 +14,7 @@ DEFAULT_CONFIG = {
     "vision_model": "qwen3-vl-plus",
     "embedding_model": "qwen3-vl-embedding",
     "rerank_model": "qwen3-vl-rerank",
+    "embedding_batch_size": 2,
 }
 
 class ConfigManager:

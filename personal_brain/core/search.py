@@ -88,6 +88,30 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
                         'file_type': file_data['type'],
                         'distance': distance
                     })
+                continue
+
+            # 3. Check for Entry Embeddings (New in v3)
+            cursor.execute("""
+                SELECT e.content_text, e.id, e.entry_type, e.created_at, e.tags
+                FROM entry_embeddings ee
+                JOIN entries e ON ee.entry_id = e.id
+                WHERE ee.rowid = ?
+            """, (rowid,))
+            entry_data = cursor.fetchone()
+            
+            if entry_data:
+                candidates.append({
+                    'type': 'entry',
+                    'content': entry_data['content_text'],
+                    'entry_id': entry_data['id'],
+                    'entry_type': entry_data['entry_type'],
+                    'created_at': entry_data['created_at'],
+                    'tags': entry_data['tags'],
+                    'distance': distance,
+                    'filename': f"Entry: {entry_data['entry_type']}", # for display compat
+                    'file_type': 'entry'
+                })
+                continue
                     
         # Apply Reranking
         if use_rerank and candidates:

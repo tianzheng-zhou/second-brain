@@ -21,6 +21,8 @@ __pycache__/
 data/
 brain.db
 *.db
+*.db-wal
+*.db-shm
 personal_brain_data/
 storage/
 uploads/

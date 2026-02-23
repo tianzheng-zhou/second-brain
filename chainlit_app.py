@@ -193,10 +193,18 @@ async def main(message: cl.Message):
                     try:
                         # Run ingestion in a separate thread to avoid blocking the UI
                         # ingest_path is synchronous, so we use cl.make_async
-                        await cl.make_async(ingest_path)(temp_file_path)
-                        count += 1
-                        status_msg.content = f"✅ Successfully ingested: {original_name}"
-                        await status_msg.update()
+                        result = await cl.make_async(ingest_path)(temp_file_path)
+                        
+                        # Check result status
+                        if result["failed"] == 0:
+                            count += 1
+                            status_msg.content = f"✅ Successfully ingested: {original_name}"
+                            await status_msg.update()
+                        else:
+                            error_details = "; ".join(result["errors"][:1])
+                            status_msg.content = f"❌ Failed to ingest {original_name}: {error_details}"
+                            await status_msg.update()
+                            
                     except Exception as e:
                         status_msg.content = f"❌ Failed to ingest {original_name}: {str(e)}"
                         await status_msg.update()

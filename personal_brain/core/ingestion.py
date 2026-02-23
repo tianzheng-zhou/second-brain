@@ -7,8 +7,8 @@ from personal_brain.core.indexer import extract_text, generate_embedding_chunks,
 from personal_brain.core.cleaner import calculate_trash_score
 from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding, get_db_connection
 
-def process_file(file_path: Path):
-    """Process a single file."""
+def process_file(file_path: Path) -> bool:
+    """Process a single file. Returns True if successful."""
     print(f"Processing {file_path}...")
     
     try:
@@ -19,7 +19,7 @@ def process_file(file_path: Path):
         existing = get_file(file_id)
         if existing:
             print(f"File {file_path.name} already exists (ID: {file_id}). Skipping.")
-            return
+            return True
         
         # 3. Organize file (Move/Copy to storage)
         stored_path = organize_file(file_path, file_id)
@@ -56,14 +56,17 @@ def process_file(file_path: Path):
         if text and file_obj.trash_score > 0.2:
             print("Generating embedding chunks...")
             chunks, embeddings = generate_embedding_chunks(text, image_root)
-            if chunks and embeddings:
+            if chunks and embeddings and len(chunks) == len(embeddings):
                 save_chunks(file_id, chunks, embeddings)
+            else:
+                print(f"Warning: Embedding generation incomplete for {file_obj.filename}")
                 
         print(f"Ingestion complete for {file_obj.filename}")
+        return True
         
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
-        # Mark as failed in DB if possible, or just log
+        return False
 
 def refresh_index_for_file(file_id: str):
     """
@@ -117,23 +120,36 @@ def refresh_index_for_file(file_id: str):
         print(f"Error refreshing file {file_id}: {e}")
         return False
 
-def ingest_path(path_str: str):
-    """Ingest a file or directory."""
+def ingest_path(path_str: str) -> dict:
+    """Ingest a file or directory. Returns stats dict."""
     path = Path(path_str).resolve()
+    stats = {"total": 0, "success": 0, "failed": 0, "errors": []}
+
     if not path.exists():
-        print(f"Path {path} does not exist.")
-        return
+        stats["errors"].append(f"Path {path} does not exist.")
+        return stats
         
+    files_to_process = []
     if path.is_file():
-        process_file(path)
+        files_to_process.append(path)
     elif path.is_dir():
         for root, _, files in os.walk(path):
             for file in files:
-                file_path = Path(root) / file
-                # Skip system files or hidden files
-                if file.startswith('.'):
-                    continue
-                try:
-                    process_file(file_path)
-                except Exception as e:
-                    print(f"Error processing {file_path}: {e}")
+                if not file.startswith('.'):
+                    files_to_process.append(Path(root) / file)
+    
+    stats["total"] = len(files_to_process)
+    
+    for file_path in files_to_process:
+        try:
+            success = process_file(file_path)
+            if success:
+                stats["success"] += 1
+            else:
+                stats["failed"] += 1
+                stats["errors"].append(f"Failed: {file_path.name}")
+        except Exception as e:
+            stats["failed"] += 1
+            stats["errors"].append(f"Error {file_path.name}: {str(e)}")
+            
+    return stats

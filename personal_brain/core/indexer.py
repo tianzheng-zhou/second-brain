@@ -5,6 +5,7 @@ import re
 import hashlib
 from pathlib import Path
 from openai import OpenAI
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from personal_brain.config import (
     DASHSCOPE_API_KEY, 
     DASHSCOPE_BASE_URL, 
@@ -212,8 +213,40 @@ def markdown_multimodal_splitter(text: str, image_root: Path) -> tuple[list[str]
         # Parse this paragraph
         p_inputs = _parse_multimodal_chunk(p, image_root)
         
+        # If p_inputs itself is too large, we must split it
+        if len(p_inputs) > MAX_INPUTS_PER_CHUNK:
+             # Flush current if any
+             if current_chunk_inputs:
+                 raw_chunks.append("".join(current_chunk_text))
+                 input_lists.append(current_chunk_inputs)
+                 current_chunk_text = []
+                 current_chunk_inputs = []
+                 current_len = 0
+             
+             # Split p_inputs
+             for i in range(0, len(p_inputs), MAX_INPUTS_PER_CHUNK):
+                 sub_inputs = p_inputs[i:i+MAX_INPUTS_PER_CHUNK]
+                 # For text representation, we can't easily map back to original text parts of p
+                 # without complex logic.
+                 # Simplified approach: Use a generic label or try to extract text from sub_inputs
+                 sub_text_parts = []
+                 for item in sub_inputs:
+                     if 'text' in item:
+                         sub_text_parts.append(item['text'])
+                     else:
+                         sub_text_parts.append("[Image]")
+                 
+                 raw_chunks.append("".join(sub_text_parts))
+                 input_lists.append(sub_inputs)
+                 
+             continue
+        
         # Check if adding this paragraph would exceed limits
-        would_exceed_inputs = (len(current_chunk_inputs) + len(p_inputs)) > MAX_INPUTS_PER_CHUNK
+        extra_item_for_separator = 0
+        if current_chunk_inputs and ("text" not in current_chunk_inputs[-1]):
+            extra_item_for_separator = 1
+            
+        would_exceed_inputs = (len(current_chunk_inputs) + len(p_inputs) + extra_item_for_separator) > MAX_INPUTS_PER_CHUNK
         would_exceed_len = (current_len + len(p)) > CHUNK_SIZE
         
         # If chunk is full or input count limit reached
@@ -396,19 +429,21 @@ def extract_text(file_path: Path, file_type: FileType) -> tuple[str, Path | None
 import concurrent.futures
 import time
 
+@retry(
+    stop=stop_after_attempt(3), 
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    reraise=True
+)
 def _generate_single_embedding(chunk_input, index, total):
     """Helper function to generate embedding for a single chunk."""
     if total > 1 and (index+1) % 5 == 0:
         print(f"Embedding chunk {index+1}/{total}...")
         
     try:
-        # Construct input based on type
-        # If chunk_input is str, wrap it. If it's list, use as is.
         final_input = chunk_input
         if isinstance(chunk_input, str):
             final_input = [{"text": chunk_input}]
             
-        # Use qwen3-vl-embedding via DashScope SDK
         resp = dashscope.MultiModalEmbedding.call(
             model=config_manager.get("embedding_model"),
             input=final_input
@@ -432,11 +467,15 @@ def _generate_single_embedding(chunk_input, index, total):
                     
                     if embedding:
                         return chunk_input, embedding
+        elif resp.status_code == 429:
+            # Explicitly raise exception to trigger retry
+            raise Exception(f"Rate limit exceeded (429): {resp.message}")
         else:
             print(f"Error generating embedding for chunk {index}: {resp.code} - {resp.message}")
             
     except Exception as e:
         print(f"Error generating embedding for chunk {index}: {e}")
+        raise e # Raise exception for retry or external capture
         
     return None, None
 
@@ -473,7 +512,7 @@ def generate_embedding_chunks(text: str, image_root: Path = None):
     
     # Use ThreadPoolExecutor for parallel processing with batching
     # Batching helps reduce CPU spikes and memory usage by not submitting all tasks at once
-    batch_size = 5
+    batch_size = config_manager.get("embedding_batch_size", 1)
     
     # Pre-allocate list for results to maintain order naturally
     # (Though we still verify index for safety)
@@ -505,11 +544,16 @@ def generate_embedding_chunks(text: str, image_root: Path = None):
                     print(f"Chunk {index} generated an exception: {exc}")
             
             # Small sleep to let CPU cool down and prevent rate limit spikes
-            time.sleep(0.2)
+            time.sleep(0.5)
 
     # Filter out None results (failed chunks)
     valid_results = [r for r in results if r is not None]
     
+    if len(valid_results) != total_chunks:
+        print(f"Warning: Only {len(valid_results)}/{total_chunks} chunks successfully embedded.")
+        # Fail fast: if any chunk fails, return empty to trigger failure in ingestion
+        return [], []
+
     valid_chunks = [r[0] for r in valid_results]
     embeddings = [r[1] for r in valid_results]
             
