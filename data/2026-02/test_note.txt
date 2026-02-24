@@ -1,4 +1,0 @@
-This is a test note for PersonalBrain.
-It contains some important information about artificial intelligence and memory systems.
-We want to verify if the semantic search can find this note based on its content.
-The system should be able to index this text and retrieve it later.
