@@ -4,7 +4,7 @@ from personal_brain.core.reranker import rerank_documents
 from typing import List, Dict
 import struct
 
-def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range: tuple = None) -> List[Dict]:
+def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range: tuple = None, entry_type: str = None) -> List[Dict]:
     """
     Search for files using semantic search with optional reranking and time filtering.
     
@@ -13,6 +13,7 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
         limit: Number of final results to return
         use_rerank: Whether to apply reranking (default: True)
         time_range: Optional tuple (start_datetime, end_datetime)
+        entry_type: Optional filter for entry type (e.g. 'file', 'text_only', 'mixed')
     """
     embedding = generate_embedding(query)
     if not embedding:
@@ -115,6 +116,33 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
                     'file_type': 'entry'
                 })
                 continue
+
+        # Filter candidates by entry_type if specified
+        if entry_type:
+            filtered_by_type = []
+            for c in candidates:
+                # Map candidate type to entry_type semantics
+                # 'chunk' -> 'file'
+                # 'file' -> 'file'
+                # 'entry' -> check c['entry_type']
+                c_type = c.get('type')
+                c_entry_type = c.get('entry_type')
+                
+                match = False
+                if entry_type == 'file':
+                    if c_type in ('chunk', 'file') or (c_type == 'entry' and c_entry_type in ('mixed', 'file_only')):
+                        match = True
+                elif entry_type == 'text':
+                    if c_type == 'entry' and c_entry_type == 'text_only':
+                        match = True
+                else:
+                    # Exact match or partial?
+                    if c_type == 'entry' and c_entry_type == entry_type:
+                        match = True
+                
+                if match:
+                    filtered_by_type.append(c)
+            candidates = filtered_by_type
 
         # Time Filtering
         if time_range:

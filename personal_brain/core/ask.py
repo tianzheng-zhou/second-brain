@@ -1,8 +1,9 @@
 import json
 from personal_brain.core.llm import call_llm
 from personal_brain.core.tools import TOOL_DEFINITIONS, AVAILABLE_TOOLS
+from personal_brain.core.database import log_agent_action
 
-def ask_brain(query: str, history: list = None, stream: bool = True):
+def ask_brain(query: str, history: list = None, stream: bool = True, conversation_id: str = None):
     """
     Agent-based ask brain.
     """
@@ -11,10 +12,14 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
     1. **Memory**: Store important information, files, and conversations using `write_entry`. 
        - If the user uploads files (you see file paths in context), use `write_entry(content=..., file_paths=[...])` to save them.
        - Always summarize what you are saving.
+       - You can control graph extraction with `save_to_graph`. Default is True.
     2. **Retrieval**: 
-       - Use `search_semantic` for natural language queries (e.g. "what did I say about AI last week").
+       - Use `search_semantic` for natural language queries.
+         - IMPORTANT: If user mentions a time range (e.g., "last week"), try to convert it to ISO8601 `time_range_start` and `time_range_end`.
+         - Use `entry_type` to filter ('file', 'text', 'mixed') if user specifically asks for files or notes.
        - Use `search_graph` for entity-specific queries (e.g. "who is Zhang San", "projects related to Rust").
-    3. **Graph**: Entities and relations are automatically extracted when you write entries.
+    3. **Maintenance**:
+       - Use `update_entry` to modify existing entries if user corrects you or adds details.
 
     IMPORTANT: 
     - If a tool returns 'confirmation_needed', you MUST ask the user for confirmation clearly and explicitly.
@@ -43,6 +48,9 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
         # Append the assistant's "thinking" (tool call) to history
         messages.append(msg)
         
+        tool_calls_log = []
+        tool_results_log = []
+        
         for tool_call in msg.tool_calls:
             function_name = tool_call.function.name
             function_args_str = tool_call.function.arguments
@@ -52,16 +60,24 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
             except json.JSONDecodeError:
                 function_args = {}
             
+            # Inject conversation_id if tool supports it (write_entry)
+            if function_name == "write_entry" and conversation_id:
+                function_args["conversation_id"] = conversation_id
+            
             # Execute Tool
             if function_name in AVAILABLE_TOOLS:
                 print(f"Executing tool: {function_name} with args: {function_args}")
                 tool_func = AVAILABLE_TOOLS[function_name]
+                
+                tool_calls_log.append({"name": function_name, "args": function_args})
                 
                 try:
                     tool_result = tool_func(**function_args)
                     tool_result_str = str(tool_result)
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})
+                
+                tool_results_log.append(tool_result_str)
                 
                 # Extract sources if search
                 if function_name == "search_semantic":
@@ -84,6 +100,10 @@ def ask_brain(query: str, history: list = None, stream: bool = True):
                     "name": function_name,
                     "content": tool_result_str
                 })
+        
+        # Log Audit
+        if conversation_id:
+            log_agent_action(conversation_id, query, tool_calls_log, tool_results_log)
         
         # 3. Final Answer (Streaming)
         # Call LLM again with tool outputs

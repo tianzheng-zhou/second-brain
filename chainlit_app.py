@@ -16,7 +16,8 @@ from personal_brain.core.ask import ask_brain
 from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.database import (
     get_all_files, 
-    delete_file_record
+    delete_file_record,
+    save_conversation
 )
 
 # Initialize Data Layer
@@ -62,14 +63,16 @@ async def auth_callback(username, password):
 @cl.on_chat_start
 async def start():
     """Initialize the chat session."""
-    # user = cl.user_session.get("user")
-    # if user:
-    #     print(f"[DEBUG] on_chat_start: user={user.identifier}, id={user.id}")
-    # else:
-    #     print("[DEBUG] on_chat_start: No user in session")
-
     # Initialize empty history for LLM context
     cl.user_session.set("history", [])
+    
+    # Save conversation metadata
+    session_id = cl.context.session.id
+    save_conversation({
+        "id": session_id,
+        "title": "New Chat", # TODO: Generate title
+        "summary": "New conversation started."
+    })
     
     # Display welcome message
     await cl.Message(content="👋 Welcome to **PersonalBrain**! \n\nUpload files to add them to your knowledge base, or ask questions to search your notes.").send()
@@ -212,7 +215,13 @@ async def main(message: cl.Message):
         try:
             # Call your existing RAG function
             # ask_brain returns (response_stream, sources)
-            response_stream, sources = await cl.make_async(ask_brain)(full_query_for_agent, history=history, stream=True)
+            session_id = cl.context.session.id
+            response_stream, sources = await cl.make_async(ask_brain)(
+                full_query_for_agent, 
+                history=history, 
+                stream=True,
+                conversation_id=session_id
+            )
             
             full_response = ""
             

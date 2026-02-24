@@ -133,6 +133,30 @@ def init_db():
         )
     """)
 
+    # Conversations table (New in v3)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS conversations (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            created_at TIMESTAMP,
+            updated_at TIMESTAMP,
+            summary TEXT
+        )
+    """)
+
+    # Agent Audit Logs table (New in v3)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS agent_audit_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id TEXT,
+            user_query TEXT,
+            tool_calls TEXT,
+            tool_results TEXT,
+            timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(conversation_id) REFERENCES conversations(id)
+        )
+    """)
+
     # Entries table (New in v3)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS entries (
@@ -145,9 +169,22 @@ def init_db():
             tags TEXT,
             importance REAL,
             trash_score REAL,
-            status TEXT
+            status TEXT,
+            conversation_id TEXT
         )
     """)
+    
+    # Migration: Add conversation_id to entries if not exists
+    try:
+        cursor.execute("SELECT conversation_id FROM entries LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cursor.execute("ALTER TABLE entries ADD COLUMN conversation_id TEXT")
+            print("Migrated entries table: added conversation_id column")
+        except Exception as e:
+            print(f"Migration warning: {e}")
+
+    # Entry Files junction table
 
     # Entry Files junction table
     cursor.execute("""
@@ -417,12 +454,14 @@ def save_entry(entry: dict):
                 UPDATE entries SET
                     content_text = ?, content_json = ?, entry_type = ?,
                     created_at = ?, source = ?, tags = ?,
-                    importance = ?, trash_score = ?, status = ?
+                    importance = ?, trash_score = ?, status = ?,
+                    conversation_id = ?
                 WHERE id = ?
             """, (
                 entry.get('content_text'), entry.get('content_json'), entry.get('entry_type'),
                 entry.get('created_at'), entry.get('source'), entry.get('tags'),
                 entry.get('importance'), entry.get('trash_score'), entry.get('status'),
+                entry.get('conversation_id'),
                 entry['id']
             ))
         else:
@@ -430,12 +469,13 @@ def save_entry(entry: dict):
             cursor.execute("""
                 INSERT INTO entries (
                     id, content_text, content_json, entry_type,
-                    created_at, source, tags, importance, trash_score, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, source, tags, importance, trash_score, status, conversation_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 entry['id'], entry.get('content_text'), entry.get('content_json'), entry.get('entry_type'),
                 entry.get('created_at'), entry.get('source'), entry.get('tags'),
-                entry.get('importance'), entry.get('trash_score'), entry.get('status')
+                entry.get('importance'), entry.get('trash_score'), entry.get('status'),
+                entry.get('conversation_id')
             ))
         conn.commit()
         return True
@@ -629,6 +669,46 @@ def get_entity_relations(entity_id: str):
         """, (entity_id, entity_id))
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def save_conversation(conversation: dict):
+    """Save or update a conversation metadata."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT OR REPLACE INTO conversations (id, title, created_at, updated_at, summary)
+            VALUES (?, ?, ?, ?, ?)
+        """, (
+            conversation['id'], conversation.get('title'), 
+            conversation.get('created_at', datetime.now()), 
+            conversation.get('updated_at', datetime.now()),
+            conversation.get('summary')
+        ))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving conversation: {e}")
+        return False
+    finally:
+        conn.close()
+
+def log_agent_action(conversation_id: str, user_query: str, tool_calls: list, tool_results: list):
+    """Log agent audit trail."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            INSERT INTO agent_audit_logs (conversation_id, user_query, tool_calls, tool_results)
+            VALUES (?, ?, ?, ?)
+        """, (
+            conversation_id, user_query, 
+            json.dumps(tool_calls), json.dumps(tool_results)
+        ))
+        conn.commit()
+    except Exception as e:
+        print(f"Error logging agent action: {e}")
     finally:
         conn.close()
 

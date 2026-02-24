@@ -440,6 +440,41 @@ def extract_text(file_path: Path, file_type: FileType) -> tuple[str, Path | None
 import concurrent.futures
 import time
 
+def _sanitize_base64_image(base64_str: str) -> str:
+    """Sanitize base64 image: ensure RGB JPEG format, resize if too large."""
+    try:
+        # Decode
+        if "," in base64_str:
+            header, data = base64_str.split(",", 1)
+        else:
+            data = base64_str
+            header = "data:image/jpeg;base64" # Assume jpeg
+            
+        img_data = base64.b64decode(data)
+        
+        # Open with PIL
+        from PIL import Image
+        import io
+        
+        with Image.open(io.BytesIO(img_data)) as img:
+            # Convert to RGB
+            if img.mode not in ('RGB', 'L'):
+                img = img.convert('RGB')
+            
+            # Check size. If > 2048 on any side, resize.
+            # (DashScope has a limit, typically 20MB or resolution. 2048 is safe.)
+            if max(img.size) > 2048:
+                 img.thumbnail((2048, 2048), Image.Resampling.LANCZOS)
+            
+            # Re-save
+            out_buf = io.BytesIO()
+            img.save(out_buf, format='JPEG', quality=85) # slightly lower quality to ensure valid file
+            return f"data:image/jpeg;base64,{base64.b64encode(out_buf.getvalue()).decode('utf-8')}"
+            
+    except Exception as e:
+        print(f"Image sanitization failed: {e}")
+        return base64_str # Return original if failed
+
 @retry(
     stop=stop_after_attempt(3), 
     wait=wait_exponential(multiplier=1, min=2, max=10),
@@ -481,6 +516,77 @@ def _generate_single_embedding(chunk_input, index, total):
         elif resp.status_code == 429:
             # Explicitly raise exception to trigger retry
             raise Exception(f"Rate limit exceeded (429): {resp.message}")
+        elif resp.status_code == 500 or (hasattr(resp, 'code') and 'InternalError' in str(resp.code)):
+             # DashScope InternalError.Algo often caused by image issues.
+             # User requirement: Do NOT drop image. Do NOT downgrade.
+             # Strategy: Try to sanitize image (convert to RGB JPEG, resize if needed) and retry.
+             
+             print(f"Warning: Chunk {index} failed with {getattr(resp, 'code', resp.status_code)}. Attempting to sanitize images and retry...")
+             
+             try:
+                 new_input = []
+                 sanitized = False
+                 
+                 if isinstance(chunk_input, list):
+                     import copy
+                     new_input = copy.deepcopy(chunk_input)
+                     
+                     for item in new_input:
+                         if 'image' in item:
+                             # Sanitize
+                             old_b64 = item['image']
+                             new_b64 = _sanitize_base64_image(old_b64)
+                             if new_b64 != old_b64:
+                                 item['image'] = new_b64
+                                 sanitized = True
+                 
+                 if sanitized:
+                     # Retry with sanitized input
+                     # Note: this call is synchronous and blocking inside the retry loop of the main function?
+                     # No, _generate_single_embedding is the one being retried.
+                     # But we are inside it.
+                     # We can just make the call. If it fails, we raise Exception, and @retry will catch it and retry the WHOLE function again.
+                     # But if we retry the whole function, we use the original 'chunk_input' again!
+                     # So the sanitization won't persist across retries unless we change the logic.
+                     
+                     # Actually, we should just perform the call here. If it succeeds, return.
+                     # If it fails, raise exception.
+                     
+                     retry_resp = dashscope.MultiModalEmbedding.call(
+                         model=config_manager.get("embedding_model"),
+                         input=new_input
+                     )
+                     
+                     if retry_resp.status_code == 200:
+                          output = getattr(retry_resp, 'output', None)
+                          if output is None and isinstance(retry_resp, dict):
+                              output = retry_resp.get('output')
+                          
+                          if output:
+                              embeddings_data = getattr(output, 'embeddings', None)
+                              if embeddings_data is None and isinstance(output, dict):
+                                  embeddings_data = output.get('embeddings')
+                              
+                              if embeddings_data and len(embeddings_data) > 0:
+                                  embedding_item = embeddings_data[0]
+                                  embedding = getattr(embedding_item, 'embedding', None)
+                                  if embedding is None and isinstance(embedding_item, dict):
+                                      embedding = embedding_item.get('embedding')
+                                  
+                                  if embedding:
+                                      print(f"Successfully embedded chunk {index} after sanitization.")
+                                      return new_input, embedding
+                     
+                     print(f"Retry with sanitized images failed: {getattr(retry_resp, 'code', retry_resp.status_code)} - {retry_resp.message}")
+                     raise Exception(f"Embedding failed after image sanitization: {retry_resp.message}")
+                 else:
+                     # No images were changed (maybe sanitization failed or wasn't needed)
+                     print(f"Sanitization made no changes for chunk {index}.")
+                     raise Exception(f"InternalError.Algo (500) on chunk {index}: {resp.message}")
+                     
+             except Exception as e:
+                 print(f"Error during image sanitization retry for chunk {index}: {e}")
+                 raise e
         else:
             print(f"Error generating embedding for chunk {index}: {resp.code} - {resp.message}")
             

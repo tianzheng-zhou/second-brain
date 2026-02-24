@@ -4,14 +4,14 @@ import dateparser
 from datetime import datetime
 from personal_brain.core.database import (
     save_entry, save_entry_embedding, link_entry_files, delete_entry_record,
-    save_entity, save_relation, get_entities_by_name, get_entity_relations
+    save_entity, save_relation, get_entities_by_name, get_entity_relations, get_entry
 )
 from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.indexer import generate_embedding
 from personal_brain.core.search import search_files
 from personal_brain.core.llm import call_llm
 
-def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tags=None, importance=0.5):
+def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tags=None, importance=0.5, save_to_graph=True, conversation_id=None):
     """
     Writes a new memory entry.
     """
@@ -61,8 +61,9 @@ def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tag
         "source": source,
         "tags": json.dumps(tags or []),
         "importance": importance,
-        "trash_score": 0.0, # TODO: calculate score
-        "status": "active"
+        "trash_score": 0.0,
+        "status": "active",
+        "conversation_id": conversation_id
     }
     
     # 5. Save to DB
@@ -77,8 +78,8 @@ def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tag
         if processed_file_ids:
             link_entry_files(entry_id, processed_file_ids)
 
-        # 8. Extract Entities (Auto)
-        if content_text:
+        # 8. Extract Entities (Auto if requested)
+        if save_to_graph and content_text:
             try:
                 # Extract and Save
                 entities_json = extract_entities(content_text)
@@ -90,20 +91,10 @@ def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tag
                     
                 # Save relations
                 for rel in data.get("relations", []):
-                    # We need IDs for relations. 
-                    # If extract_entities returned names, we need to map them back to IDs.
-                    # Simple approach: save_entity returns ID.
-                    # But relations rely on source/target names in the extraction result.
-                    # We should probably map names to IDs first.
-                    
-                    # For now, let's just save them if we can resolve names to IDs
-                    # Or modify save_relation to look up by name? 
-                    # No, better to look up here.
                     src_ents = get_entities_by_name(rel['source'])
                     tgt_ents = get_entities_by_name(rel['target'])
                     
                     if src_ents and tgt_ents:
-                        # Pick best match (simplest: first one)
                         rel['source'] = src_ents[0]['id']
                         rel['target'] = tgt_ents[0]['id']
                         rel['file_id'] = processed_file_ids[0] if processed_file_ids else None
@@ -121,30 +112,52 @@ def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tag
     else:
         return json.dumps({"status": "error", "message": "Database save failed"})
 
-def search_semantic(query, time_hint=None, limit=5):
+def update_entry(entry_id, new_content=None, new_tags=None):
+    """
+    Update an existing entry.
+    """
+    entry = get_entry(entry_id)
+    if not entry:
+        return json.dumps({"status": "error", "message": f"Entry {entry_id} not found"})
+        
+    if new_content:
+        entry['content_text'] = new_content
+        # Re-generate embedding
+        embedding = generate_embedding(new_content)
+        if embedding:
+            save_entry_embedding(entry_id, embedding)
+            
+    if new_tags:
+        entry['tags'] = json.dumps(new_tags)
+        
+    if save_entry(entry):
+        return json.dumps({"status": "success", "message": f"Entry {entry_id} updated"})
+    else:
+        return json.dumps({"status": "error", "message": "Database update failed"})
+
+def search_semantic(query, time_hint=None, time_range_start=None, time_range_end=None, entry_type=None, limit=5):
     """
     Search semantic memory with time filtering.
     """
     time_range = None
-    if time_hint:
-        # Simple parsing logic
-        # For "last week", we want (now-7d, now)
-        # dateparser.parse returns a single date.
-        # We need a range.
-        # This is complex. Let's simplify: 
-        # If time_hint is specific (e.g. 2023), start=2023-01-01, end=2023-12-31?
-        # For now, let's just use dateparser to get a 'start' point and assume end is now?
-        # Or just pass the hint to LLM to resolve to ISO range?
-        # Better: Let Agent resolve it? No, search_semantic is a tool called BY Agent.
-        # Agent should pass ISO range? 
-        # PRD says "time_hint" is string.
-        # Let's try to parse "start" date.
+    
+    # Prefer explicit range
+    if time_range_start:
+        start_dt = dateparser.parse(time_range_start)
+        end_dt = dateparser.parse(time_range_end) if time_range_end else datetime.now()
+        if start_dt:
+            time_range = (start_dt, end_dt)
+            
+    # Fallback to hint
+    elif time_hint:
         dt = dateparser.parse(time_hint)
         if dt:
-             # Assume query is "after this date"
+             # Assume query is "after this date" or around this date
+             # If it's a specific date like "2023-01-01", maybe we want that day?
+             # For now, keep "since then" logic as default unless refined
              time_range = (dt, datetime.now())
     
-    results = search_files(query, limit=limit, time_range=time_range)
+    results = search_files(query, limit=limit, time_range=time_range, entry_type=entry_type)
     
     # Format results for LLM
     formatted = []
@@ -252,9 +265,26 @@ TOOL_DEFINITIONS = [
                     "file_paths": {"type": "array", "items": {"type": "string"}, "description": "List of absolute file paths to ingest and link"},
                     "time_hint": {"type": "string", "description": "Natural language time reference (e.g. 'last week', 'yesterday')"},
                     "tags": {"type": "array", "items": {"type": "string"}},
-                    "importance": {"type": "number", "description": "0.0 to 1.0"}
+                    "importance": {"type": "number", "description": "0.0 to 1.0"},
+                    "save_to_graph": {"type": "boolean", "description": "Whether to automatically extract entities and relations to graph (default True)"}
                 },
                 "required": ["content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_entry",
+            "description": "Update an existing entry content or tags.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entry_id": {"type": "string", "description": "ID of the entry to update"},
+                    "new_content": {"type": "string", "description": "New text content"},
+                    "new_tags": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["entry_id"]
             }
         }
     },
@@ -267,7 +297,10 @@ TOOL_DEFINITIONS = [
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "The search query"},
-                    "time_hint": {"type": "string", "description": "Optional time filter (e.g. 'last month')"}
+                    "time_hint": {"type": "string", "description": "Optional time filter (e.g. 'last month')"},
+                    "time_range_start": {"type": "string", "description": "ISO8601 start date"},
+                    "time_range_end": {"type": "string", "description": "ISO8601 end date"},
+                    "entry_type": {"type": "string", "description": "Filter by type: 'file', 'text', 'mixed'"}
                 },
                 "required": ["query"]
             }
@@ -322,6 +355,7 @@ TOOL_DEFINITIONS = [
 
 AVAILABLE_TOOLS = {
     "write_entry": write_entry,
+    "update_entry": update_entry,
     "search_semantic": search_semantic,
     "search_graph": search_graph,
     "extract_entities": extract_entities,

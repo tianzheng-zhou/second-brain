@@ -20,13 +20,16 @@ __pycache__/
 # Database and Storage
 data/
 brain.db
+
 *.db
 *.db-wal
 *.db-shm
+
 personal_brain_data/
 storage/
 uploads/
 mineru_cache/
+
 *.pdf
 *.txt
 *.png
@@ -65,3 +68,4 @@ test_note.txt
 tmp/
 temp/
 personal_brain_uploads/
+data/brain.db
