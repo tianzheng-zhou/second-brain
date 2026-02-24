@@ -8,15 +8,16 @@
 
 ## 已完成任务 (Completed Tasks)
 
-| 日期 (Date) | 任务 (Task) | 状态 (Status) | 备注 (Notes) |
+| 日期 (Date) | 模块 (Module) | 任务 (Task) | 详情 (Details) |
 |---|---|---|---|
-| 2026-02-24 | **数据库 Schema 升级 (v3)** | 已完成 | 实现了 Conversations, Entries, Files, AgentAuditLogs, Entities 等核心表结构。 |
-| 2026-02-24 | **多模态写入 (Ingestion)** | 已完成 | 集成 MinerU (PDF), Qwen-VL (图片), Qwen-ASR (音频) 解析；支持自动摘要与标签提取。 |
-| 2026-02-24 | **混合检索系统 (Search)** | 已完成 | 实现 search_semantic (支持时间/类型过滤) 和 search_graph；集成 Reranker 优化结果。 |
-| 2026-02-24 | **Agent 核心逻辑** | 已完成 | 基于 Tool Calling 的 Agent，支持思维链记录 (Audit Logs) 和上下文注入。 |
-| 2026-02-24 | **Chainlit 交互界面** | 已完成 | 实现会话管理 (Start/Resume)，文件拖拽上传，流式响应，引用展示。 |
+| 2026-02-24 | **Database** | **Schema V3 升级** | 核心表结构 `conversations` (会话), `entries` (笔记), `files` (文件), `agent_audit_logs` (审计), `entities`/`relations` (图谱) 已全部实现。 |
+| 2026-02-24 | **Ingestion** | **多模态解析管道** | 1. **PDF**: 集成 MinerU + Aliyun OSS，支持高精度 OCR 解析。<br>2. **图片**: 集成 Qwen-VL-Plus，实现视觉理解与文本提取。<br>3. **音频**: 集成 Qwen-ASR，支持长音频转写与自动清理。 |
+| 2026-02-24 | **Search** | **混合检索系统** | 1. **语义搜索**: 基于 `sqlite-vec` 实现向量检索，支持时间范围 (`start/end`) 和类型 (`file`/`entry`) 过滤。<br>2. **重排序**: 集成 `qwen3-vl-rerank` 模型，对检索结果进行二次排序优化。<br>3. **图谱搜索**: 实现 `search_graph` 工具，支持实体关系查询。 |
+| 2026-02-24 | **Agent** | **核心逻辑与工具** | 1. **工具集**: `read_document` (全文读取), `search_semantic` (语义检索), `write_entry` (写入), `update_entry` (更新), `delete_entry` (删除)。<br>2. **审计**: 完整记录 Tool Calls 和思考过程至 `agent_audit_logs`。<br>3. **上下文**: 支持 Conversation History 注入和 Long Context 处理。 |
+| 2026-02-24 | **UI** | **Chainlit 交互** | 1. **会话管理**: 支持多轮对话、历史记录持久化与恢复 (`on_chat_resume`)。<br>2. **文件交互**: 支持拖拽上传自动触发 Ingestion，侧边栏文件列表 (`/side`) 及删除功能。<br>3. **反馈机制**: 流式响应 (Streaming) 与引用来源 (Sources) 展示。 |
 
 ## 待办事项 (Backlog)
-- [ ] **Web 搜索能力**: 集成联网搜索工具以补充知识。
-- [ ] **主动整理 Agent**: 实现后台定期运行任务，自动整理碎片化笔记。
-- [ ] **性能优化**: 针对大量文件的向量检索速度优化。
+- [ ] **Web 搜索能力**: 集成联网搜索工具 (如 Serper/Google Search) 以补充外部知识。
+- [ ] **主动整理 Agent**: 实现后台定期运行任务 (Gardener)，自动整理碎片化笔记并优化图谱。
+- [ ] **性能优化**: 针对大量文件场景下的向量检索速度优化 (考虑 HNSW 索引参数调优)。
+- [ ] **多用户支持**: 虽然数据库已预留字段，但应用层尚未实现多用户隔离逻辑。
