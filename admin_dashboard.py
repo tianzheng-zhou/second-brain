@@ -95,7 +95,7 @@ with st.sidebar:
         # Use primary type for active page, secondary for others
         btn_type = "primary" if is_active else "secondary"
         
-        if st.button(f"{icon}  {page_name}", key=f"nav_{page_name}", type=btn_type, use_container_width=True):
+        if st.button(f"{icon}  {page_name}", key=f"nav_{page_name}", type=btn_type):
             st.session_state['current_page'] = page_name
             st.rerun()
             
@@ -151,6 +151,12 @@ if menu == "Dashboard":
             df = pd.DataFrame(files[:5])
             st.dataframe(
                 df[['filename', 'type', 'created_at', 'size_bytes']], 
+                column_config={
+                    "filename": "Filename",
+                    "type": "Type",
+                    "created_at": "Created",
+                    "size_bytes": "Size"
+                },
                 use_container_width=True,
                 hide_index=True
             )
@@ -420,7 +426,7 @@ elif menu == "Vector Search":
                         
                         for p in possible_paths:
                             if p.exists():
-                                st.image(str(p), caption=res['filename'], use_container_width=True)
+                                st.image(str(p), caption=res['filename'])
                                 break
                     else:
                         # Text content
@@ -465,7 +471,7 @@ elif menu == "Vector Search":
                                         pass
                                 
                                 if found_img:
-                                    st.image(str(found_img), caption=f"Image found in text: {alt}", use_container_width=True)
+                                    st.image(str(found_img), caption=f"Image found in text: {alt}")
                                 else:
                                     # If not found, maybe just display the text
                                     pass

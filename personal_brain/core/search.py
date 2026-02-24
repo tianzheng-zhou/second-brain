@@ -4,14 +4,15 @@ from personal_brain.core.reranker import rerank_documents
 from typing import List, Dict
 import struct
 
-def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Dict]:
+def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range: tuple = None) -> List[Dict]:
     """
-    Search for files using semantic search with optional reranking.
+    Search for files using semantic search with optional reranking and time filtering.
     
     Args:
         query: User query
         limit: Number of final results to return
         use_rerank: Whether to apply reranking (default: True)
+        time_range: Optional tuple (start_datetime, end_datetime)
     """
     embedding = generate_embedding(query)
     if not embedding:
@@ -30,9 +31,9 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
         # Serialize query embedding
         query_bytes = struct.pack(f'<{len(embedding)}f', *embedding)
         
-        # Initial retrieval limit (fetch more for reranking)
-        # If reranking, fetch 10x the limit or at least 50
-        fetch_limit = max(50, limit * 10) if use_rerank else limit
+        # Initial retrieval limit (fetch more for filtering & reranking)
+        # If time filtering is on, we need even more candidates
+        fetch_limit = max(100, limit * 20)
         
         # Search using sqlite-vec
         cursor.execute("""
@@ -52,7 +53,7 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
             
             # 1. Try to map via chunk_embeddings (New Chunk Logic)
             cursor.execute("""
-                SELECT fc.content, fc.file_id, fc.chunk_index, f.filename, f.type
+                SELECT fc.content, fc.file_id, fc.chunk_index, f.filename, f.type, f.created_at
                 FROM chunk_embeddings ce
                 JOIN file_chunks fc ON ce.chunk_id = fc.id
                 JOIN files f ON fc.file_id = f.id
@@ -67,6 +68,7 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
                     'file_id': chunk_data['file_id'],
                     'filename': chunk_data['filename'],
                     'file_type': chunk_data['type'],
+                    'created_at': chunk_data['created_at'],
                     'distance': distance
                 })
                 continue
@@ -86,10 +88,11 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
                         'file_id': file_data['id'],
                         'filename': file_data['filename'],
                         'file_type': file_data['type'],
+                        'created_at': file_data['created_at'],
                         'distance': distance
                     })
                 continue
-
+            
             # 3. Check for Entry Embeddings (New in v3)
             cursor.execute("""
                 SELECT e.content_text, e.id, e.entry_type, e.created_at, e.tags
@@ -108,11 +111,35 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True) -> List[Di
                     'created_at': entry_data['created_at'],
                     'tags': entry_data['tags'],
                     'distance': distance,
-                    'filename': f"Entry: {entry_data['entry_type']}", # for display compat
+                    'filename': f"Entry: {entry_data['entry_type']}",
                     'file_type': 'entry'
                 })
                 continue
-                    
+
+        # Time Filtering
+        if time_range:
+            start_dt, end_dt = time_range
+            filtered_candidates = []
+            for c in candidates:
+                # Parse created_at if it's string
+                c_time = c.get('created_at')
+                if isinstance(c_time, str):
+                    try:
+                        from dateparser import parse
+                        c_time = parse(c_time)
+                    except:
+                        c_time = None
+                
+                if c_time:
+                    # Check range
+                    # Ensure timezone awareness compatibility if needed, strict comparison for now
+                    if start_dt <= c_time <= end_dt:
+                        filtered_candidates.append(c)
+            candidates = filtered_candidates
+
+        if not candidates:
+            return []
+
         # Apply Reranking
         if use_rerank and candidates:
             print(f"Reranking {len(candidates)} candidates...")

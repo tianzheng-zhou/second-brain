@@ -2,12 +2,16 @@ import json
 import uuid
 import dateparser
 from datetime import datetime
-from personal_brain.core.database import save_entry, save_entry_embedding, link_entry_files, delete_entry_record
+from personal_brain.core.database import (
+    save_entry, save_entry_embedding, link_entry_files, delete_entry_record,
+    save_entity, save_relation, get_entities_by_name, get_entity_relations
+)
+from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.indexer import generate_embedding
 from personal_brain.core.search import search_files
 from personal_brain.core.llm import call_llm
 
-def write_entry(content, files=None, time_hint=None, source="web_chat", tags=None, importance=0.5):
+def write_entry(content, file_paths=None, time_hint=None, source="web_chat", tags=None, importance=0.5):
     """
     Writes a new memory entry.
     """
@@ -21,14 +25,29 @@ def write_entry(content, files=None, time_hint=None, source="web_chat", tags=Non
     # 2. Create ID
     entry_id = str(uuid.uuid4())
     
-    # 3. Construct Entry Object
+    # 3. Process Files (if any)
+    processed_file_ids = []
+    file_info_list = []
+    if file_paths:
+        print(f"Processing {len(file_paths)} files for entry...")
+        for path in file_paths:
+            # ingest_path now returns stats with file_ids
+            stats = ingest_path(path)
+            if stats.get("file_ids"):
+                processed_file_ids.extend(stats["file_ids"])
+                file_info_list.append({"path": path, "status": "ingested"})
+            else:
+                file_info_list.append({"path": path, "status": "failed", "error": stats.get("errors")})
+
+    # 4. Construct Entry Object
     entry_type = "text_only"
-    if files:
-        entry_type = "mixed"
+    if processed_file_ids:
+        entry_type = "mixed" if content.get("text") else "file_only"
     
     content_text = content.get("text", "")
     content_json = json.dumps({
-        "files": files or [],
+        "file_paths": file_paths or [],
+        "file_ids": processed_file_ids,
         "description": content.get("description", ""),
         "conversation_turns": content.get("conversation_turns", [])
     })
@@ -46,24 +65,59 @@ def write_entry(content, files=None, time_hint=None, source="web_chat", tags=Non
         "status": "active"
     }
     
-    # 4. Save to DB
+    # 5. Save to DB
     if save_entry(entry_data):
-        # 5. Generate Embedding
+        # 6. Generate Embedding
         if content_text:
             embedding = generate_embedding(content_text)
             if embedding:
                 save_entry_embedding(entry_id, embedding)
         
-        # 6. Link Files
-        if files:
-            file_ids = [f.get("id") for f in files if f.get("id")]
-            link_entry_files(entry_id, file_ids)
+        # 7. Link Files
+        if processed_file_ids:
+            link_entry_files(entry_id, processed_file_ids)
 
-        # 7. Extract Entities (Optional/Async in future)
-        # entities = extract_entities(content_text)
-        # TODO: Save entities to graph
+        # 8. Extract Entities (Auto)
+        if content_text:
+            try:
+                # Extract and Save
+                entities_json = extract_entities(content_text)
+                data = json.loads(entities_json)
+                
+                # Save entities
+                for ent in data.get("entities", []):
+                    ent_id = save_entity(ent)
+                    
+                # Save relations
+                for rel in data.get("relations", []):
+                    # We need IDs for relations. 
+                    # If extract_entities returned names, we need to map them back to IDs.
+                    # Simple approach: save_entity returns ID.
+                    # But relations rely on source/target names in the extraction result.
+                    # We should probably map names to IDs first.
+                    
+                    # For now, let's just save them if we can resolve names to IDs
+                    # Or modify save_relation to look up by name? 
+                    # No, better to look up here.
+                    src_ents = get_entities_by_name(rel['source'])
+                    tgt_ents = get_entities_by_name(rel['target'])
+                    
+                    if src_ents and tgt_ents:
+                        # Pick best match (simplest: first one)
+                        rel['source'] = src_ents[0]['id']
+                        rel['target'] = tgt_ents[0]['id']
+                        rel['file_id'] = processed_file_ids[0] if processed_file_ids else None
+                        save_relation(rel)
+                        
+            except Exception as e:
+                print(f"Entity extraction warning: {e}")
             
-        return json.dumps({"entry_id": entry_id, "status": "success", "message": f"Entry saved at {created_at}"})
+        return json.dumps({
+            "entry_id": entry_id, 
+            "status": "success", 
+            "message": f"Entry saved at {created_at}",
+            "files_processed": len(processed_file_ids)
+        })
     else:
         return json.dumps({"status": "error", "message": "Database save failed"})
 
@@ -71,10 +125,26 @@ def search_semantic(query, time_hint=None, limit=5):
     """
     Search semantic memory with time filtering.
     """
-    # For now, time filtering is not implemented in search_files, only semantic search.
-    # Future: parse time_hint and filter results.
+    time_range = None
+    if time_hint:
+        # Simple parsing logic
+        # For "last week", we want (now-7d, now)
+        # dateparser.parse returns a single date.
+        # We need a range.
+        # This is complex. Let's simplify: 
+        # If time_hint is specific (e.g. 2023), start=2023-01-01, end=2023-12-31?
+        # For now, let's just use dateparser to get a 'start' point and assume end is now?
+        # Or just pass the hint to LLM to resolve to ISO range?
+        # Better: Let Agent resolve it? No, search_semantic is a tool called BY Agent.
+        # Agent should pass ISO range? 
+        # PRD says "time_hint" is string.
+        # Let's try to parse "start" date.
+        dt = dateparser.parse(time_hint)
+        if dt:
+             # Assume query is "after this date"
+             time_range = (dt, datetime.now())
     
-    results = search_files(query, limit=limit)
+    results = search_files(query, limit=limit, time_range=time_range)
     
     # Format results for LLM
     formatted = []
@@ -83,10 +153,36 @@ def search_semantic(query, time_hint=None, limit=5):
             "content": res.get("content", ""),
             "type": res.get("type", "unknown"),
             "score": res.get("score", 0),
-            "created_at": str(res.get("created_at", "unknown"))
+            "created_at": str(res.get("created_at", "unknown")),
+            "filename": res.get("filename", "")
         })
         
     return json.dumps(formatted)
+
+def search_graph(entity_name, depth=1):
+    """
+    Search knowledge graph for an entity and its relations.
+    """
+    entities = get_entities_by_name(entity_name)
+    if not entities:
+        return json.dumps({"message": f"No entity found for '{entity_name}'"})
+        
+    result = {
+        "entity": entities[0],
+        "relations": []
+    }
+    
+    # Get relations for the top match
+    rels = get_entity_relations(entities[0]['id'])
+    for r in rels:
+        result["relations"].append({
+            "source": r['source_name'],
+            "target": r['target_name'],
+            "type": r['type'],
+            "confidence": r['confidence']
+        })
+        
+    return json.dumps(result)
 
 def extract_entities(text):
     if not text:
@@ -141,7 +237,7 @@ TOOL_DEFINITIONS = [
         "type": "function",
         "function": {
             "name": "write_entry",
-            "description": "Write a new memory entry (note, idea, conversation summary).",
+            "description": "Write a new memory entry (note, idea, conversation summary). Can include file paths.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -153,6 +249,7 @@ TOOL_DEFINITIONS = [
                         },
                         "required": ["text"]
                     },
+                    "file_paths": {"type": "array", "items": {"type": "string"}, "description": "List of absolute file paths to ingest and link"},
                     "time_hint": {"type": "string", "description": "Natural language time reference (e.g. 'last week', 'yesterday')"},
                     "tags": {"type": "array", "items": {"type": "string"}},
                     "importance": {"type": "number", "description": "0.0 to 1.0"}
@@ -173,6 +270,21 @@ TOOL_DEFINITIONS = [
                     "time_hint": {"type": "string", "description": "Optional time filter (e.g. 'last month')"}
                 },
                 "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_graph",
+            "description": "Search knowledge graph for an entity and its relations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "entity_name": {"type": "string", "description": "Name of the entity to search"},
+                    "depth": {"type": "integer", "description": "Search depth (default 1)"}
+                },
+                "required": ["entity_name"]
             }
         }
     },
@@ -211,6 +323,7 @@ TOOL_DEFINITIONS = [
 AVAILABLE_TOOLS = {
     "write_entry": write_entry,
     "search_semantic": search_semantic,
+    "search_graph": search_graph,
     "extract_entities": extract_entities,
     "delete_entry": delete_entry
 }

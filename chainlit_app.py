@@ -166,62 +166,31 @@ async def main(message: cl.Message):
         await list_files_message(display_in_side_view=True)
         return
 
-    # --- 2. Handle File Uploads ---
+    # --- 2. Handle File Uploads & Context ---
+    uploaded_file_paths = []
+    
     if message.elements:
-        processing_msg = cl.Message(content="📥 Processing uploaded files...")
-        await processing_msg.send()
+        # Create a persistent temp directory for this session/message 
+        # (Note: In production, you might want better cleanup policies)
+        temp_dir = os.path.join(tempfile.gettempdir(), "personal_brain_uploads")
+        os.makedirs(temp_dir, exist_ok=True)
         
-        count = 0
-        # Create a temporary directory to handle uploads safely
-        temp_dir = tempfile.mkdtemp()
-        
-        try:
-            for element in message.elements:
-                # Check for file path (Chainlit v1+)
-                if hasattr(element, "path"):
-                    original_name = element.name
-                    # Create a path with original filename in temp dir
-                    # This is important because ingest_path uses the filename extension to determine file type
-                    temp_file_path = os.path.join(temp_dir, original_name)
-                    
-                    # Copy the temp file to our temp path with correct name
-                    shutil.copy2(element.path, temp_file_path)
-                    
-                    status_msg = cl.Message(content=f"⏳ Ingesting {original_name}...")
-                    await status_msg.send()
-                    
-                    try:
-                        # Run ingestion in a separate thread to avoid blocking the UI
-                        # ingest_path is synchronous, so we use cl.make_async
-                        result = await cl.make_async(ingest_path)(temp_file_path)
-                        
-                        # Check result status
-                        if result["failed"] == 0:
-                            count += 1
-                            status_msg.content = f"✅ Successfully ingested: {original_name}"
-                            await status_msg.update()
-                        else:
-                            error_details = "; ".join(result["errors"][:1])
-                            status_msg.content = f"❌ Failed to ingest {original_name}: {error_details}"
-                            await status_msg.update()
-                            
-                    except Exception as e:
-                        status_msg.content = f"❌ Failed to ingest {original_name}: {str(e)}"
-                        await status_msg.update()
-            
-            if count > 0:
-                await cl.Message(content=f"🎉 Processed {count} files successfully.").send()
+        for element in message.elements:
+            if hasattr(element, "path"):
+                original_name = element.name
+                # Use a unique prefix to avoid collisions
+                safe_name = f"{cl.user_session.get('id')}_{original_name}"
+                dest_path = os.path.join(temp_dir, safe_name)
                 
-        finally:
-            # Cleanup temp directory
-            try:
-                shutil.rmtree(temp_dir, ignore_errors=True)
-            except:
-                pass
+                shutil.copy2(element.path, dest_path)
+                uploaded_file_paths.append(dest_path)
+                
+        if uploaded_file_paths:
+             await cl.Message(content=f"📎 Received {len(uploaded_file_paths)} files. I can analyze them or save them to memory.").send()
 
     # --- 3. Handle Text Query (RAG) ---
-    # Only proceed if there is text content
-    if message.content:
+    # Proceed if there is text OR files (if files only, treat as "analyze these files")
+    if message.content or uploaded_file_paths:
         
         msg = cl.Message(content="")
         await msg.send()
@@ -229,11 +198,21 @@ async def main(message: cl.Message):
         # Get chat history
         history = cl.user_session.get("history", [])
         
+        # Construct query with file context if needed
+        query_text = message.content or "Please analyze the uploaded files."
+        
+        # Add file paths to the system context or message
+        # We append a hidden system-like instruction to the user message for the Agent to see
+        if uploaded_file_paths:
+            file_context = "\n\n[System Context] User uploaded files at these paths:\n" + "\n".join(uploaded_file_paths)
+            full_query_for_agent = query_text + file_context
+        else:
+            full_query_for_agent = query_text
+
         try:
             # Call your existing RAG function
             # ask_brain returns (response_stream, sources)
-            # We need to make sure ask_brain is compatible with async calls if it's blocking
-            response_stream, sources = await cl.make_async(ask_brain)(message.content, history=history, stream=True)
+            response_stream, sources = await cl.make_async(ask_brain)(full_query_for_agent, history=history, stream=True)
             
             full_response = ""
             

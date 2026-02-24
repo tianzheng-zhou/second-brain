@@ -27,6 +27,17 @@ personal_brain_data/
 storage/
 uploads/
 mineru_cache/
+*.pdf
+*.txt
+*.png
+*.jpg
+*.jpeg
+
+# Documentation files to keep
+!README.md
+!chainlit.md
+!docs/
+!requirements.txt
 
 # Logs
 logs/
@@ -53,3 +64,4 @@ coverage/
 test_note.txt
 tmp/
 temp/
+personal_brain_uploads/

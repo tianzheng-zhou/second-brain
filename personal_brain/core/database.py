@@ -2,6 +2,7 @@ import sqlite3
 import struct
 import json
 from pathlib import Path
+from datetime import datetime
 from personal_brain.config import DB_PATH, EMBEDDING_DIMENSION
 
 def get_db_connection():
@@ -516,3 +517,118 @@ def delete_entry_record(entry_id: str):
         return False
     finally:
         conn.close()
+
+def save_entity(entity: dict):
+    """
+    Save an entity to the knowledge graph.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Check if exists (by name and type) or ID
+        # If ID provided, use it. If not, check name.
+        if not entity.get('id'):
+            # Try to find by name
+            cursor.execute("SELECT id, mention_count FROM entities WHERE name = ? AND type = ?", (entity['name'], entity['type']))
+            existing = cursor.fetchone()
+            if existing:
+                # Update count
+                new_count = (existing['mention_count'] or 1) + 1
+                cursor.execute("UPDATE entities SET mention_count = ? WHERE id = ?", (new_count, existing['id']))
+                entity['id'] = existing['id'] # Return existing ID
+            else:
+                # Insert new
+                import uuid
+                new_id = str(uuid.uuid4())
+                cursor.execute("""
+                    INSERT INTO entities (id, name, type, first_seen, mention_count, metadata)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (
+                    new_id, entity['name'], entity['type'], 
+                    entity.get('first_seen', datetime.now()), 
+                    1, 
+                    json.dumps(entity.get('metadata', {}))
+                ))
+                entity['id'] = new_id
+        else:
+            # Update existing by ID
+             cursor.execute("""
+                INSERT OR REPLACE INTO entities (id, name, type, first_seen, mention_count, metadata)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                entity['id'], entity['name'], entity['type'], 
+                entity.get('first_seen', datetime.now()), 
+                entity.get('mention_count', 1), 
+                json.dumps(entity.get('metadata', {}))
+            ))
+            
+        conn.commit()
+        return entity['id']
+    except Exception as e:
+        print(f"Error saving entity {entity.get('name')}: {e}")
+        return None
+    finally:
+        conn.close()
+
+def save_relation(relation: dict):
+    """
+    Save a relation between entities.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Check if exists
+        cursor.execute("""
+            SELECT rowid FROM relations 
+            WHERE source = ? AND target = ? AND type = ?
+        """, (relation['source'], relation['target'], relation['type']))
+        
+        if not cursor.fetchone():
+            cursor.execute("""
+                INSERT INTO relations (source, target, type, file_id, confidence, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                relation['source'], relation['target'], relation['type'],
+                relation.get('file_id'), relation.get('confidence', 1.0),
+                relation.get('created_at', datetime.now())
+            ))
+            conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error saving relation: {e}")
+        return False
+    finally:
+        conn.close()
+
+def get_entities_by_name(name: str):
+    """
+    Search entities by name (partial match).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM entities WHERE name LIKE ?", (f"%{name}%",))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def get_entity_relations(entity_id: str):
+    """
+    Get all relations for an entity (source or target).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT r.*, e1.name as source_name, e2.name as target_name 
+            FROM relations r
+            JOIN entities e1 ON r.source = e1.id
+            JOIN entities e2 ON r.target = e2.id
+            WHERE r.source = ? OR r.target = ?
+        """, (entity_id, entity_id))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+

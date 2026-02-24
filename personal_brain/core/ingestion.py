@@ -19,7 +19,7 @@ def process_file(file_path: Path) -> bool:
         existing = get_file(file_id)
         if existing:
             print(f"File {file_path.name} already exists (ID: {file_id}). Skipping.")
-            return True
+            return True, file_id
         
         # 3. Organize file (Move/Copy to storage)
         stored_path = organize_file(file_path, file_id)
@@ -62,11 +62,11 @@ def process_file(file_path: Path) -> bool:
                 print(f"Warning: Embedding generation incomplete for {file_obj.filename}")
                 
         print(f"Ingestion complete for {file_obj.filename}")
-        return True
+        return True, file_id
         
     except Exception as e:
         print(f"Error processing {file_path}: {e}")
-        return False
+        return False, None
 
 def refresh_index_for_file(file_id: str):
     """
@@ -121,9 +121,9 @@ def refresh_index_for_file(file_id: str):
         return False
 
 def ingest_path(path_str: str) -> dict:
-    """Ingest a file or directory. Returns stats dict."""
+    """Ingest a file or directory. Returns stats dict and list of processed file_ids."""
     path = Path(path_str).resolve()
-    stats = {"total": 0, "success": 0, "failed": 0, "errors": []}
+    stats = {"total": 0, "success": 0, "failed": 0, "errors": [], "file_ids": []}
 
     if not path.exists():
         stats["errors"].append(f"Path {path} does not exist.")
@@ -142,9 +142,11 @@ def ingest_path(path_str: str) -> dict:
     
     for file_path in files_to_process:
         try:
-            success = process_file(file_path)
+            success, file_id = process_file(file_path)
             if success:
                 stats["success"] += 1
+                if file_id:
+                    stats["file_ids"].append(file_id)
             else:
                 stats["failed"] += 1
                 stats["errors"].append(f"Failed: {file_path.name}")
