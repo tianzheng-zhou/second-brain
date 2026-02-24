@@ -8,6 +8,7 @@ from personal_brain.config import ensure_dirs, STORAGE_PATH, DB_PATH
 from personal_brain.core.ingestion import ingest_path, refresh_index_for_file
 from personal_brain.core.search import search_files
 from personal_brain.core.ask import ask_brain
+from personal_brain.utils.file_ops import SUPPORTED_EXTENSIONS
 
 # Page configuration
 st.set_page_config(
@@ -153,7 +154,8 @@ elif choice == "Ingest":
                         st.error(f"Error: {str(e)}")
 
     with tab2:
-        uploaded_files = st.file_uploader("Upload files", accept_multiple_files=True)
+        st.info(f"Supported formats: {', '.join(sorted(SUPPORTED_EXTENSIONS))}")
+        uploaded_files = st.file_uploader("Upload files", accept_multiple_files=True, type=list(SUPPORTED_EXTENSIONS))
         if uploaded_files:
             if st.button("Process Uploaded Files"):
                 # Create a temp directory for uploads

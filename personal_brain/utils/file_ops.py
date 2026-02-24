@@ -6,6 +6,17 @@ from datetime import datetime
 from personal_brain.config import STORAGE_PATH
 from personal_brain.core.models import FileType
 
+SUPPORTED_EXTENSIONS = {
+    # Images
+    "png", "jpg", "jpeg", "webp", "gif",
+    # Audio
+    "mp3", "wav", "ogg", "m4a",
+    # Documents
+    "pdf",
+    # Text / Code
+    "txt", "md", "markdown", "json", "csv", "py", "js", "html", "css", "yaml", "yml", "xml"
+}
+
 def calculate_file_id(file_path: Path, chunk_size=4096) -> str:
     """Calculate SHA256 hash of a file and return first 16 chars."""
     sha256 = hashlib.sha256()
@@ -15,7 +26,20 @@ def calculate_file_id(file_path: Path, chunk_size=4096) -> str:
     return sha256.hexdigest()[:16]
 
 def get_file_type(file_path: Path) -> FileType:
-    """Determine file type based on mime type."""
+    """Determine file type based on mime type or extension."""
+    # Check extension first for known types to ensure consistency with SUPPORTED_EXTENSIONS
+    ext = file_path.suffix.lower().lstrip('.')
+    
+    if ext in {"png", "jpg", "jpeg", "webp", "gif"}:
+        return FileType.IMAGE
+    elif ext in {"mp3", "wav", "ogg", "m4a"}:
+        return FileType.AUDIO
+    elif ext == "pdf":
+        return FileType.PDF
+    elif ext in {"txt", "md", "markdown", "json", "csv", "py", "js", "html", "css", "yaml", "yml", "xml"}:
+        return FileType.TEXT
+        
+    # Fallback to mimetypes for other potential types
     mime_type, _ = mimetypes.guess_type(file_path)
     if not mime_type:
         return FileType.UNKNOWN

@@ -16,6 +16,7 @@ from personal_brain.core.config_manager import config_manager
 from personal_brain.core.models import FileType
 from personal_brain.utils.aliyun_oss import AliyunOSS
 from personal_brain.utils.mineru import MinerUClient
+from personal_brain.utils.asr_client import ASRClient
 
 # Simple text splitter logic
 def recursive_character_text_splitter(text: str, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
@@ -418,8 +419,18 @@ def extract_text(file_path: Path, file_type: FileType) -> tuple[str, Path | None
             return "", None
             
     elif file_type == FileType.AUDIO:
-        # Placeholder for audio transcription
-        return "[Audio file - transcription not implemented]", None
+        # Use qwen3-asr-flash-filetrans
+        try:
+            print(f"Transcribing audio {file_path.name}...")
+            asr_client = ASRClient()
+            text = asr_client.transcribe(file_path)
+            if not text:
+                print(f"ASR returned empty text for {file_path.name}")
+                return "", None
+            return text, None
+        except Exception as e:
+            print(f"Error transcribing audio {file_path}: {e}")
+            return "", None
         
     elif file_type == FileType.PDF:
         return _process_pdf(file_path)
