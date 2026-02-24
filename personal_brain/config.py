@@ -33,6 +33,7 @@ ALIYUN_OSS_BUCKET = os.getenv("ALIYUN_OSS_BUCKET")
 # MinerU Configuration
 MINERU_API_TOKEN = os.getenv("MINERU_API_TOKEN")
 MINERU_BASE_URL = os.getenv("MINERU_BASE_URL", "https://mineru.net/api/v4")
+MINERU_USE_SYSTEM_PROXY = os.getenv("MINERU_USE_SYSTEM_PROXY", "true").lower() == "true"
 
 # Agent Settings
 DELETE_CONFIRMATION = os.getenv("DELETE_CONFIRMATION", "true").lower() == "true"

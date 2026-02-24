@@ -3,7 +3,7 @@ import time
 import zipfile
 import io
 from pathlib import Path
-from personal_brain.config import MINERU_API_TOKEN, MINERU_BASE_URL
+from personal_brain.config import MINERU_API_TOKEN, MINERU_BASE_URL, MINERU_USE_SYSTEM_PROXY
 
 class MinerUClient:
     def __init__(self):
@@ -18,6 +18,12 @@ class MinerUClient:
             "Authorization": f"Bearer {MINERU_API_TOKEN}"
         }
 
+        # Configure proxy settings
+        if MINERU_USE_SYSTEM_PROXY:
+            self.proxies = None  # Use system/env proxies
+        else:
+            self.proxies = {"http": None, "https": None}  # Disable proxies
+
     def submit_task(self, file_url: str, is_ocr: bool = False) -> str:
         """Submit a PDF extraction task."""
         url = f"{self.base_url}/extract/task"
@@ -30,7 +36,7 @@ class MinerUClient:
         }
         
         print(f"Submitting MinerU task for URL: {file_url[:50]}...")
-        resp = requests.post(url, headers=self.headers, json=data)
+        resp = requests.post(url, headers=self.headers, json=data, proxies=self.proxies)
         
         try:
             resp.raise_for_status()
@@ -49,7 +55,7 @@ class MinerUClient:
     def get_task_status(self, task_id: str):
         """Check task status."""
         url = f"{self.base_url}/extract/task/{task_id}"
-        resp = requests.get(url, headers=self.headers)
+        resp = requests.get(url, headers=self.headers, proxies=self.proxies)
         resp.raise_for_status()
         return resp.json()
 
@@ -97,7 +103,7 @@ class MinerUClient:
         resp = None
         for attempt in range(max_retries):
             try:
-                resp = requests.get(zip_url, timeout=300) # Add timeout
+                resp = requests.get(zip_url, timeout=300, proxies=self.proxies) # Add timeout
                 resp.raise_for_status()
                 break # Success
             except (requests.exceptions.ConnectionError, requests.exceptions.ChunkedEncodingError, requests.exceptions.Timeout) as e:
