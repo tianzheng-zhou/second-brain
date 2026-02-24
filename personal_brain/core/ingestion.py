@@ -58,6 +58,15 @@ def process_file(file_path: Path) -> bool:
             chunks, embeddings = generate_embedding_chunks(text, image_root)
             if chunks and embeddings and len(chunks) == len(embeddings):
                 save_chunks(file_id, chunks, embeddings)
+                
+                # 9. Auto-Enrichment (Summary, Tags, Entities)
+                print("Performing auto-enrichment...")
+                try:
+                    from personal_brain.core.enrichment import enrich_file
+                    enrich_file(file_obj, text, chunks, embeddings)
+                except Exception as enrich_e:
+                    print(f"Auto-enrichment failed: {enrich_e}")
+                    
             else:
                 print(f"Warning: Embedding generation incomplete for {file_obj.filename}")
                 

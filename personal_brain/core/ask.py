@@ -51,6 +51,10 @@ def ask_brain(query: str, history: list = None, stream: bool = True, conversatio
         tool_calls_log = []
         tool_results_log = []
         
+        # Check if this is a file search/read task
+        # If LLM decides to search or read a file, we can proactively provide context
+        # But for now, let's just execute the tools.
+        
         for tool_call in msg.tool_calls:
             function_name = tool_call.function.name
             function_args_str = tool_call.function.arguments
@@ -73,6 +77,19 @@ def ask_brain(query: str, history: list = None, stream: bool = True, conversatio
                 
                 try:
                     tool_result = tool_func(**function_args)
+                    
+                    # Special handling for read_document "too_large" status
+                    # If result is JSON string, parse it to check status
+                    try:
+                        res_data = json.loads(tool_result) if isinstance(tool_result, str) else tool_result
+                        if isinstance(res_data, dict) and res_data.get("status") == "too_large":
+                            # The tool itself now returns a "reranked_preview" (summary chunks)
+                            # We don't need to do extra work here, just pass the result back to LLM.
+                            # The LLM will see the "message" and "reranked_preview" and "suggestion".
+                            pass
+                    except:
+                        pass
+                        
                     tool_result_str = str(tool_result)
                 except Exception as e:
                     tool_result_str = json.dumps({"error": str(e)})

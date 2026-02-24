@@ -4,7 +4,7 @@ from personal_brain.core.reranker import rerank_documents
 from typing import List, Dict
 import struct
 
-def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range: tuple = None, entry_type: str = None) -> List[Dict]:
+def search_files(query: str, limit: int = 20, use_rerank: bool = True, time_range: tuple = None, entry_type: str = None, file_id: str = None) -> List[Dict]:
     """
     Search for files using semantic search with optional reranking and time filtering.
     
@@ -37,6 +37,10 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
         fetch_limit = max(100, limit * 20)
         
         # Search using sqlite-vec
+        # Note: sqlite-vec doesn't support complex WHERE clauses mixed with MATCH easily in one go if we rely on rowid mapping
+        # But we can filter AFTER vector search, OR use a subquery if possible.
+        # Given we fetch fetch_limit candidates, filtering after is usually fine unless selectivity is very low.
+        
         cursor.execute("""
             SELECT rowid, distance 
             FROM vec_items 
@@ -63,10 +67,15 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
             chunk_data = cursor.fetchone()
             
             if chunk_data:
+                # Filter by file_id if specified
+                if file_id and chunk_data['file_id'] != file_id:
+                    continue
+                    
                 candidates.append({
                     'type': 'chunk',
                     'content': chunk_data['content'],
                     'file_id': chunk_data['file_id'],
+                    'chunk_index': chunk_data['chunk_index'],
                     'filename': chunk_data['filename'],
                     'file_type': chunk_data['type'],
                     'created_at': chunk_data['created_at'],
@@ -78,8 +87,12 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
             cursor.execute("SELECT file_id FROM file_embeddings WHERE rowid = ?", (rowid,))
             mapping = cursor.fetchone()
             if mapping:
-                file_id = mapping['file_id']
-                cursor.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+                mapped_file_id = mapping['file_id']
+                # Filter by file_id if specified
+                if file_id and mapped_file_id != file_id:
+                    continue
+                    
+                cursor.execute("SELECT * FROM files WHERE id = ?", (mapped_file_id,))
                 file_row = cursor.fetchone()
                 if file_row:
                     file_data = dict(file_row)
@@ -95,6 +108,10 @@ def search_files(query: str, limit: int = 5, use_rerank: bool = True, time_range
                 continue
             
             # 3. Check for Entry Embeddings (New in v3)
+            # If file_id is specified, we skip entries (unless we link entries to files? But entries are distinct)
+            if file_id:
+                continue
+
             cursor.execute("""
                 SELECT e.content_text, e.id, e.entry_type, e.created_at, e.tags
                 FROM entry_embeddings ee

@@ -4,7 +4,8 @@ import dateparser
 from datetime import datetime
 from personal_brain.core.database import (
     save_entry, save_entry_embedding, link_entry_files, delete_entry_record,
-    save_entity, save_relation, get_entities_by_name, get_entity_relations, get_entry
+    save_entity, save_relation, get_entities_by_name, get_entity_relations, get_entry,
+    get_db_connection
 )
 from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.indexer import generate_embedding
@@ -135,7 +136,7 @@ def update_entry(entry_id, new_content=None, new_tags=None):
     else:
         return json.dumps({"status": "error", "message": "Database update failed"})
 
-def search_semantic(query, time_hint=None, time_range_start=None, time_range_end=None, entry_type=None, limit=5):
+def search_semantic(query, time_hint=None, time_range_start=None, time_range_end=None, entry_type=None, limit=20, file_id=None):
     """
     Search semantic memory with time filtering.
     """
@@ -157,7 +158,7 @@ def search_semantic(query, time_hint=None, time_range_start=None, time_range_end
              # For now, keep "since then" logic as default unless refined
              time_range = (dt, datetime.now())
     
-    results = search_files(query, limit=limit, time_range=time_range, entry_type=entry_type)
+    results = search_files(query, limit=limit, time_range=time_range, entry_type=entry_type, file_id=file_id)
     
     # Format results for LLM
     formatted = []
@@ -244,8 +245,121 @@ def delete_entry(entry_ids, reason="User request", confirmed=False):
             
     return json.dumps({"status": "success", "deleted_count": deleted_count})
 
+def read_document(query, by="filename"):
+    """
+    Read the full content of a document (file).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if by == "id":
+            cursor.execute("SELECT * FROM files WHERE id = ?", (query,))
+        else:
+            # Search by filename (partial match)
+            cursor.execute("SELECT * FROM files WHERE filename LIKE ?", (f"%{query}%",))
+        
+        row = cursor.fetchone()
+        if row:
+            file_data = dict(row)
+            content = file_data.get('ocr_text') or ""
+            
+            # Estimate tokens more accurately
+            # Heuristic: 
+            # - CJK characters: ~1 token (range 0.6-1.5, use 1.2 for safety)
+            # - Non-CJK (English/Code): ~0.3 tokens per char (1 token ~= 3-4 chars)
+            # - Images: Count markdown image syntax ![]() and add "virtual tokens" (e.g. 1000 per image)
+            
+            import re
+            
+            # 1. Count images
+            image_pattern = r'!\[.*?\]\(.*?\)'
+            images = re.findall(image_pattern, content)
+            image_count = len(images)
+            IMAGE_COST = 1000 # Conservative estimate for vision processing
+            
+            # 2. Remove image syntax for text counting to avoid double counting
+            text_only = re.sub(image_pattern, '', content)
+            
+            # 3. Count CJK characters
+            # Range: \u4e00-\u9fff (Common CJK)
+            cjk_pattern = r'[\u4e00-\u9fff]'
+            cjk_chars = len(re.findall(cjk_pattern, text_only))
+            
+            # 4. Count other characters
+            other_chars = len(text_only) - cjk_chars
+            
+            # 5. Calculate Total Estimated Tokens
+            total_tokens = (cjk_chars * 1.2) + (other_chars * 0.35) + (image_count * IMAGE_COST)
+            
+            TOKEN_LIMIT = 20000
+            
+            if total_tokens > TOKEN_LIMIT:
+                # Fallback to semantic search automatically
+                print(f"Document too large ({int(total_tokens)} est. tokens > {TOKEN_LIMIT}). Suggesting semantic search...")
+                
+                # Perform a preliminary semantic search to get "summary" like chunks for the user
+                # Query: "summary abstract introduction conclusion"
+                # This helps giving the user SOME content to start with.
+                # Since we don't have the user query, we use a generic summarization query.
+                
+                # Import here to avoid circular dependency
+                from personal_brain.core.search import search_files
+                
+                # Get top 5 chunks that look like summary/intro
+                preview_results = search_files(
+                    query="summary abstract introduction conclusion main points", 
+                    limit=5, 
+                    file_id=file_data['id']
+                )
+                
+                formatted_preview = []
+                for res in preview_results:
+                    # Truncate if individual chunk is huge (unlikely given splitting)
+                    chunk_text = res.get('content', '')[:500] + "..." if len(res.get('content', '')) > 500 else res.get('content', '')
+                    formatted_preview.append(f"[Chunk {res.get('chunk_index', '?')}] {chunk_text}")
+                
+                preview_text = "\n\n".join(formatted_preview)
+                
+                return json.dumps({
+                    "status": "too_large", 
+                    "message": f"Document '{file_data['filename']}' is too large ({int(total_tokens)} tokens). Reading full content is disabled to prevent context overflow.",
+                    "suggestion": f"I have performed a preliminary scan. Here are some key excerpts. Please use 'search_semantic' with specific questions to explore further.",
+                    "file_id": file_data['id'],
+                    "filename": file_data['filename'],
+                    "reranked_preview": preview_text
+                })
+            
+            return json.dumps({
+                "filename": file_data['filename'],
+                "file_id": file_data['id'],
+                "content": content,
+                "type": file_data['type']
+            })
+        else:
+            return json.dumps({"status": "error", "message": f"File not found for query: {query}"})
+    except Exception as e:
+        return json.dumps({"status": "error", "message": str(e)})
+    finally:
+        conn.close()
+
 # Tool Definitions for OpenAI
 TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "read_document",
+            "description": "Read the FULL text content of a specific file/document. Useful when search results are fragmented.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The filename (partial match) or file ID"},
+                    "by": {"type": "string", "enum": ["filename", "id"], "default": "filename"}
+                },
+                "required": ["query"],
+                "description": "Read the FULL text content of a specific file/document. If doc > 20k tokens, returns summary excerpts and suggests semantic search."
+            }
+        }
+    },
     {
         "type": "function",
         "function": {
@@ -300,7 +414,9 @@ TOOL_DEFINITIONS = [
                     "time_hint": {"type": "string", "description": "Optional time filter (e.g. 'last month')"},
                     "time_range_start": {"type": "string", "description": "ISO8601 start date"},
                     "time_range_end": {"type": "string", "description": "ISO8601 end date"},
-                    "entry_type": {"type": "string", "description": "Filter by type: 'file', 'text', 'mixed'"}
+                    "entry_type": {"type": "string", "description": "Filter by type: 'file_only', 'text_only', 'mixed'"},
+                    "file_id": {"type": "string", "description": "Filter by specific file ID (useful for large documents)"},
+                    "limit": {"type": "integer", "description": "Number of results to return (default 20). Increase for comprehensive research."}
                 },
                 "required": ["query"]
             }
@@ -359,5 +475,6 @@ AVAILABLE_TOOLS = {
     "search_semantic": search_semantic,
     "search_graph": search_graph,
     "extract_entities": extract_entities,
-    "delete_entry": delete_entry
+    "delete_entry": delete_entry,
+    "read_document": read_document
 }
