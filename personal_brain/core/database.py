@@ -157,6 +157,25 @@ def init_db():
         )
     """)
 
+    # Folders table (New in v3.2)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS folders (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Add folder_id to conversations if not exists
+    try:
+        cursor.execute("SELECT folder_id FROM conversations LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cursor.execute("ALTER TABLE conversations ADD COLUMN folder_id TEXT")
+            print("Migrated conversations table: added folder_id column")
+        except Exception as e:
+            print(f"Migration warning (conversations.folder_id): {e}")
+
     # Entries table (New in v3)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS entries (
@@ -264,6 +283,65 @@ def save_chunks(file_id: str, chunks: list[str], embeddings: list[list[float]]):
         conn.rollback()
     finally:
         conn.close()
+
+def create_folder(name: str):
+    """Create a new folder."""
+    import uuid
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        folder_id = str(uuid.uuid4())
+        cursor.execute("INSERT INTO folders (id, name) VALUES (?, ?)", (folder_id, name))
+        conn.commit()
+        return folder_id
+    except Exception as e:
+        print(f"Error creating folder: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_folders():
+    """Get all folders."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM folders ORDER BY created_at DESC")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def delete_folder(folder_id: str):
+    """Delete a folder and update associated conversations."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Unlink conversations first
+        cursor.execute("UPDATE conversations SET folder_id = NULL WHERE folder_id = ?", (folder_id,))
+        # Delete folder
+        cursor.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error deleting folder: {e}")
+        return False
+    finally:
+        conn.close()
+
+def update_conversation_folder(conversation_id: str, folder_id: str):
+    """Move a conversation to a folder."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("UPDATE conversations SET folder_id = ? WHERE id = ?", (folder_id, conversation_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        print(f"Error updating conversation folder: {e}")
+        return False
+    finally:
+        conn.close()
+
 
 def save_file(file):
     conn = get_db_connection()
@@ -677,15 +755,44 @@ def save_conversation(conversation: dict):
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
-        cursor.execute("""
-            INSERT OR REPLACE INTO conversations (id, title, created_at, updated_at, summary)
-            VALUES (?, ?, ?, ?, ?)
-        """, (
-            conversation['id'], conversation.get('title'), 
+        # Use explicit INSERT ... ON CONFLICT to avoid overwriting folder_id if not provided
+        columns = ["id", "title", "created_at", "updated_at", "summary"]
+        values = [
+            conversation['id'], 
+            conversation.get('title'), 
             conversation.get('created_at', datetime.now()), 
             conversation.get('updated_at', datetime.now()),
             conversation.get('summary')
-        ))
+        ]
+        
+        placeholders = ["?"] * len(columns)
+        
+        if 'folder_id' in conversation:
+            columns.append("folder_id")
+            values.append(conversation['folder_id'])
+            placeholders.append("?")
+            
+            update_clause = """
+                title=excluded.title, 
+                updated_at=excluded.updated_at, 
+                summary=excluded.summary,
+                folder_id=excluded.folder_id
+            """
+        else:
+            update_clause = """
+                title=excluded.title, 
+                updated_at=excluded.updated_at, 
+                summary=excluded.summary
+            """
+            
+        sql = f"""
+            INSERT INTO conversations ({', '.join(columns)})
+            VALUES ({', '.join(placeholders)})
+            ON CONFLICT(id) DO UPDATE SET
+            {update_clause}
+        """
+        
+        cursor.execute(sql, tuple(values))
         conn.commit()
         return True
     except Exception as e:
@@ -693,6 +800,29 @@ def save_conversation(conversation: dict):
         return False
     finally:
         conn.close()
+
+def get_folder_conversations(folder_id: str):
+    """Get all conversations in a folder."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM conversations WHERE folder_id = ? ORDER BY updated_at DESC", (folder_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+def get_uncategorized_conversations():
+    """Get conversations not in any folder."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM conversations WHERE folder_id IS NULL ORDER BY updated_at DESC")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
 
 def log_agent_action(conversation_id: str, user_query: str, tool_calls: list, tool_results: list):
     """Log agent audit trail."""

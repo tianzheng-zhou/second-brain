@@ -19,11 +19,19 @@ from personal_brain.core.database import (
     get_all_files, 
     delete_file_record,
     save_conversation,
-    get_db_connection
+    get_db_connection,
+    create_folder,
+    get_folders,
+    delete_folder,
+    update_conversation_folder,
+    init_db
 )
 
 # Initialize Data Layer
 cl_data_layer = SQLiteDataLayer()
+
+# Initialize Core Database (Create tables if not exist)
+init_db()
 
 try:
     from chainlit.server import app
@@ -73,6 +81,47 @@ try:
 
     # Manually add route to beginning to ensure priority over Chainlit catch-all
     app.routes.insert(0, APIRoute("/ref/{ref_type}/{ref_id}", view_reference, methods=["GET"], response_class=HTMLResponse))
+
+    # --- Folder Management Routes ---
+    from pydantic import BaseModel
+    
+    class FolderCreate(BaseModel):
+        name: str
+        
+    class ConversationFolderUpdate(BaseModel):
+        folder_id: str
+
+    async def create_folder_route(folder: FolderCreate):
+        folder_id = create_folder(folder.name)
+        if folder_id:
+            return {"id": folder_id, "name": folder.name}
+        return HTMLResponse("Failed to create folder", status_code=500)
+        
+    async def get_folders_route():
+        return get_folders()
+        
+    async def delete_folder_route(folder_id: str):
+        if delete_folder(folder_id):
+            return {"success": True}
+        return HTMLResponse("Failed to delete folder", status_code=500)
+        
+    async def update_conversation_folder_route(conversation_id: str, body: ConversationFolderUpdate):
+        if update_conversation_folder(conversation_id, body.folder_id):
+            return {"success": True}
+        return HTMLResponse("Failed to update conversation folder", status_code=500)
+
+    app.add_api_route("/folders", create_folder_route, methods=["POST"])
+    app.add_api_route("/folders", get_folders_route, methods=["GET"])
+    app.add_api_route("/folders/{folder_id}", delete_folder_route, methods=["DELETE"])
+    app.add_api_route("/conversations/{conversation_id}/folder", update_conversation_folder_route, methods=["POST"])
+
+    # Force mount public directory to ensure custom_js is accessible
+    from fastapi.staticfiles import StaticFiles
+    public_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "public")
+    if os.path.exists(public_path):
+        app.mount("/public", StaticFiles(directory=public_path), name="public")
+        print(f"[INFO] Mounted /public to {public_path}")
+
 except Exception as e:
     print(f"[ERROR] Failed to register route: {e}")
     app = None
