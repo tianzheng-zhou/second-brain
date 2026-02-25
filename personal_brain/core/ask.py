@@ -33,27 +33,33 @@ def ask_brain(query: str, history: list = None, stream: bool = True, conversatio
         
     messages.append({"role": "user", "content": query})
     
-    # 1. First turn: Decide intent (Tool or Answer)
-    # We use non-streaming first to detect tool calls reliably
-    try:
-        response = call_llm(messages, tools=TOOL_DEFINITIONS, stream=False)
-        msg = response.choices[0].message
-    except Exception as e:
-        return f"Error communicating with AI: {str(e)}", []
-    
     sources = []
+    MAX_TURNS = 5
     
-    # 2. Handle Tool Calls
-    if msg.tool_calls:
+    for turn in range(MAX_TURNS):
+        # We use non-streaming first to detect tool calls reliably
+        try:
+            response = call_llm(messages, tools=TOOL_DEFINITIONS, stream=False)
+            msg = response.choices[0].message
+        except Exception as e:
+            return f"Error communicating with AI: {str(e)}", []
+        
+        # If no tool calls, this is the final answer (or if it's the last turn, we accept it)
+        if not msg.tool_calls:
+            if stream:
+                # Re-generate with stream=True
+                return call_llm(messages, stream=True), sources
+            else:
+                return response, sources
+        
+        # Handle Tool Calls
         # Append the assistant's "thinking" (tool call) to history
         messages.append(msg)
         
         tool_calls_log = []
         tool_results_log = []
         
-        # Check if this is a file search/read task
-        # If LLM decides to search or read a file, we can proactively provide context
-        # But for now, let's just execute the tools.
+        print(f"Turn {turn+1}: Agent is using tools...")
         
         for tool_call in msg.tool_calls:
             function_name = tool_call.function.name
@@ -106,7 +112,14 @@ def ask_brain(query: str, history: list = None, stream: bool = True, conversatio
                                 sources.append({
                                     "filename": r.get("filename", "Unknown"),
                                     "score": r.get("score", 0),
-                                    "type": r.get("type", "unknown")
+                                    "type": r.get("type", "unknown"),
+                                    "content": r.get("content", ""),
+                                    "ref_type": r.get("ref_type"),
+                                    "ref_id": r.get("ref_id"),
+                                    "file_id": r.get("file_id"),
+                                    "entry_id": r.get("entry_id"),
+                                    "chunk_index": r.get("chunk_index"),
+                                    "entry_type": r.get("entry_type")
                                 })
                     except:
                         pass
@@ -121,26 +134,9 @@ def ask_brain(query: str, history: list = None, stream: bool = True, conversatio
         # Log Audit
         if conversation_id:
             log_agent_action(conversation_id, query, tool_calls_log, tool_results_log)
-        
-        # 3. Final Answer (Streaming)
-        # Call LLM again with tool outputs
-        if stream:
-            return call_llm(messages, stream=True), sources
-        else:
-            return call_llm(messages, stream=False), sources
             
+    # If we fall through the loop (max turns reached), force a final response
+    if stream:
+        return call_llm(messages, stream=True), sources
     else:
-        # No tool called, just return the response
-        # Since the caller expects a stream, and we already have a non-stream response...
-        # We can either return the text (and let chainlit handle it) or re-stream.
-        # Chainlit's `main` handles `isinstance(response_stream, str)` as error.
-        # But `ChatCompletion` object is not a string.
-        # To be safe and support streaming effect, let's re-call with stream=True.
-        # This costs 2x tokens for the first chunk but ensures consistent behavior.
-        # Optimization: We could yield the content from `msg` if we wrap it in a generator.
-        
-        if stream:
-            # Re-generate with stream=True
-            return call_llm(messages, stream=True), sources
-        else:
-            return response, sources
+        return call_llm(messages, stream=False), sources

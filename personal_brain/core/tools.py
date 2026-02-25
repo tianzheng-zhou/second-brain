@@ -163,12 +163,34 @@ def search_semantic(query, time_hint=None, time_range_start=None, time_range_end
     # Format results for LLM
     formatted = []
     for res in results:
+        ref_type = None
+        ref_id = None
+        res_type = res.get("type")
+        if res_type == "chunk":
+            ref_type = "chunk"
+            chunk_index = res.get("chunk_index")
+            file_id_val = res.get("file_id")
+            if file_id_val is not None and chunk_index is not None:
+                ref_id = f"{file_id_val}_{chunk_index}"
+        elif res_type == "file":
+            ref_type = "file"
+            ref_id = res.get("file_id")
+        elif res_type == "entry":
+            ref_type = "entry"
+            ref_id = res.get("entry_id")
+
         formatted.append({
             "content": res.get("content", ""),
             "type": res.get("type", "unknown"),
             "score": res.get("score", 0),
             "created_at": str(res.get("created_at", "unknown")),
-            "filename": res.get("filename", "")
+            "filename": res.get("filename", ""),
+            "file_id": res.get("file_id"),
+            "chunk_index": res.get("chunk_index"),
+            "entry_id": res.get("entry_id"),
+            "entry_type": res.get("entry_type"),
+            "ref_type": ref_type,
+            "ref_id": ref_id
         })
         
     return json.dumps(formatted)

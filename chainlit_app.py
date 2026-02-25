@@ -4,6 +4,7 @@ import shutil
 import tempfile
 from pathlib import Path
 import sys
+import html
 
 # Add project root to sys.path to ensure imports work correctly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -17,11 +18,91 @@ from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.database import (
     get_all_files, 
     delete_file_record,
-    save_conversation
+    save_conversation,
+    get_db_connection
 )
 
 # Initialize Data Layer
 cl_data_layer = SQLiteDataLayer()
+
+try:
+    from chainlit.server import app
+    from fastapi.responses import HTMLResponse
+
+    @app.get("/ref/{ref_type}/{ref_id}")
+    async def view_reference(ref_type: str, ref_id: str):
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        try:
+            title = ""
+            content = ""
+
+            if ref_type == "file":
+                cursor.execute("SELECT filename, ocr_text FROM files WHERE id = ?", (ref_id,))
+                row = cursor.fetchone()
+                if row:
+                    title = row["filename"] or "File"
+                    content = row["ocr_text"] or ""
+            elif ref_type == "chunk":
+                cursor.execute("""
+                    SELECT f.filename, fc.content
+                    FROM file_chunks fc
+                    JOIN files f ON fc.file_id = f.id
+                    WHERE fc.id = ?
+                """, (ref_id,))
+                row = cursor.fetchone()
+                if row:
+                    title = row["filename"] or "Chunk"
+                    content = row["content"] or ""
+            elif ref_type == "entry":
+                cursor.execute("SELECT id, entry_type, content_text FROM entries WHERE id = ?", (ref_id,))
+                row = cursor.fetchone()
+                if row:
+                    title = f"Entry: {row['entry_type'] or ''}".strip()
+                    content = row["content_text"] or ""
+
+            if not content:
+                return HTMLResponse("<h3>Not found</h3>", status_code=404)
+
+            safe_title = html.escape(title)
+            safe_content = html.escape(content)
+            return HTMLResponse(f"<h2>{safe_title}</h2><pre style='white-space: pre-wrap'>{safe_content}</pre>")
+        finally:
+            conn.close()
+except Exception:
+    app = None
+
+def _get_reference_text(ref_type: str, ref_id: str):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        if ref_type == "file":
+            cursor.execute("SELECT filename, ocr_text FROM files WHERE id = ?", (ref_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None, None
+            return row["filename"] or "File", row["ocr_text"] or ""
+        if ref_type == "chunk":
+            cursor.execute("""
+                SELECT f.filename, fc.content
+                FROM file_chunks fc
+                JOIN files f ON fc.file_id = f.id
+                WHERE fc.id = ?
+            """, (ref_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None, None
+            return row["filename"] or "Chunk", row["content"] or ""
+        if ref_type == "entry":
+            cursor.execute("SELECT entry_type, content_text FROM entries WHERE id = ?", (ref_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None, None
+            title = f"Entry: {row['entry_type'] or ''}".strip()
+            return title, row["content_text"] or ""
+        return None, None
+    finally:
+        conn.close()
 
 @cl.data_layer
 def get_data_layer():
@@ -126,6 +207,22 @@ async def on_delete_file(action: cl.Action):
     except Exception as e:
         await cl.Message(content=f"Error deleting file: {e}").send()
 
+@cl.action_callback("open_ref")
+async def on_open_ref(action: cl.Action):
+    ref_type = action.payload.get("ref_type")
+    ref_id = action.payload.get("ref_id")
+    filename = action.payload.get("filename") or "Reference"
+    if not ref_type or not ref_id:
+        await cl.Message(content="Invalid reference.").send()
+        return
+    title, content = _get_reference_text(ref_type, ref_id)
+    if not content:
+        await cl.Message(content="Reference not found.").send()
+        return
+    preview = content if len(content) <= 12000 else content[:12000] + "\n\n...(truncated)"
+    element = cl.Text(name=filename, content=f"{title}\n\n{preview}", display="side", language="text")
+    await cl.Message(content=f"已打开：{filename}", elements=[element]).send()
+
 async def list_files_message(display_in_side_view=False):
     files = get_all_files()
     if not files:
@@ -194,10 +291,7 @@ async def main(message: cl.Message):
     # --- 3. Handle Text Query (RAG) ---
     # Proceed if there is text OR files (if files only, treat as "analyze these files")
     if message.content or uploaded_file_paths:
-        
-        msg = cl.Message(content="")
-        await msg.send()
-        
+
         # Get chat history
         history = cl.user_session.get("history", [])
         
@@ -228,9 +322,12 @@ async def main(message: cl.Message):
             if isinstance(response_stream, str):
                 # Error message returned as string
                 full_response = f"Error: {response_stream}"
-                msg.content = full_response
-                await msg.update()
+                msg = cl.Message(content=full_response)
+                await msg.send()
             else:
+                msg = cl.Message(content="")
+                await msg.send()
+
                 # Stream the response from OpenAI client generator
                 for chunk in response_stream:
                     if chunk.choices and chunk.choices[0].delta.content:
@@ -240,17 +337,30 @@ async def main(message: cl.Message):
                 
                 # Append sources if available
                 if sources:
-                    # Create a separate step for references to make it collapsible (as a step)
+                    # Create a separate step for references to make it collapsible
                     async with cl.Step(name="📚 References") as source_step:
-                        source_text = ""
+                        # Build a markdown list of clickable links
+                        lines = []
                         for i, src in enumerate(sources, 1):
-                            # Use small text
-                            source_text += f"{i}. {src['filename']} (Score: {src['score']:.4f})\n"
+                            filename = src.get("filename") or "Unknown"
+                            score = src.get("score", 0)
+                            ref_type = src.get("ref_type")
+                            ref_id = src.get("ref_id")
+                            if ref_type and ref_id:
+                                lines.append(f"{i}. [{filename}](/ref/{ref_type}/{ref_id}) (Score: {score:.4f})")
+                            else:
+                                lines.append(f"{i}. {filename} (Score: {score:.4f})")
                         
-                        source_step.output = source_text
-                    
-                    # Don't append to main message, just show the step
-                    # Don't save sources text to history context, just the answer
+                        # Set the step output to the markdown list directly to ensure it is inside the collapsible area
+                        source_step.output = "\n".join(lines)
+                        
+                        # Remove the child message to avoid content appearing outside the step
+                        # links_md = "\n".join(lines)
+                        # links_msg = cl.Message(content=links_md)
+                        # links_msg.parent_id = source_step.id
+                        # await links_msg.send()
+                
+                # Update history (keep last 10 turns)
                 
                 await msg.update()
                 
@@ -262,5 +372,4 @@ async def main(message: cl.Message):
                 cl.user_session.set("history", history)
                 
         except Exception as e:
-            msg.content = f"Error processing query: {str(e)}"
-            await msg.update()
+            await cl.Message(content=f"Error processing query: {str(e)}").send()
