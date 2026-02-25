@@ -29,7 +29,8 @@ try:
     from chainlit.server import app
     from fastapi.responses import HTMLResponse
 
-    @app.get("/ref/{ref_type}/{ref_id}")
+    from fastapi.routing import APIRoute
+
     async def view_reference(ref_type: str, ref_id: str):
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -69,7 +70,11 @@ try:
             return HTMLResponse(f"<h2>{safe_title}</h2><pre style='white-space: pre-wrap'>{safe_content}</pre>")
         finally:
             conn.close()
-except Exception:
+
+    # Manually add route to beginning to ensure priority over Chainlit catch-all
+    app.routes.insert(0, APIRoute("/ref/{ref_type}/{ref_id}", view_reference, methods=["GET"], response_class=HTMLResponse))
+except Exception as e:
+    print(f"[ERROR] Failed to register route: {e}")
     app = None
 
 def _get_reference_text(ref_type: str, ref_id: str):
