@@ -487,30 +487,35 @@ elif menu == "Settings":
     with tab_model:
         st.subheader("Model Selection")
         st.markdown("Configure the AI models used for different tasks.")
-        
+
         # Load current config
         current_config = config_manager.get_all()
-        
+
         # Define available options
         chat_options = ["qwen3-max", "qwen-plus", "qwen-flash", "qwen3.5-plus"]
         vision_options = ["qwen3-vl-plus", "qwen3-vl-flash", "qwen3.5-plus"]
-        
+        semantic_split_options = ["qwen3.5-flash", "qwen3.5-plus"]  # Two options for comparison
+
         # Ensure current config values are in options or use default
         current_chat_model = current_config.get("chat_model")
         if current_chat_model not in chat_options:
             current_chat_model = chat_options[0]
-            
+
         current_vision_model = current_config.get("vision_model")
         if current_vision_model not in vision_options:
             current_vision_model = vision_options[0]
-            
+
         current_ai_search_model = current_config.get("ai_search_model")
         if current_ai_search_model not in chat_options:
             current_ai_search_model = chat_options[0]
 
+        current_semantic_split_model = current_config.get("semantic_split_model")
+        if current_semantic_split_model not in semantic_split_options:
+            current_semantic_split_model = semantic_split_options[0]
+
         with st.form("model_config_form"):
             col1, col2 = st.columns(2)
-            
+
             with col1:
                 new_chat_model = st.selectbox(
                     "Chat Model (General Conversation)",
@@ -518,42 +523,50 @@ elif menu == "Settings":
                     index=chat_options.index(current_chat_model),
                     help="Used for answering user queries and general conversation."
                 )
-                
+
                 new_ai_search_model = st.selectbox(
                     "AI Search Model (Query Optimization)",
                     options=chat_options,
                     index=chat_options.index(current_ai_search_model),
                     help="Used to optimize search queries in the Admin Console AI Search."
                 )
-                
+
                 new_vision_model = st.selectbox(
                     "Vision Model (Image Understanding)",
                     options=vision_options,
                     index=vision_options.index(current_vision_model),
                     help="Used for analyzing images in uploaded files."
                 )
-                
+
             with col2:
+                new_semantic_split_model = st.selectbox(
+                    "Semantic Split Model (Chunk Segmentation)",
+                    options=semantic_split_options,
+                    index=semantic_split_options.index(current_semantic_split_model),
+                    help="Used for semantically splitting documents into chunks during indexing."
+                )
+
                 st.text_input(
                     "Embedding Model (Read-only)",
                     value=current_config.get("embedding_model"),
                     disabled=True,
                     help="Currently fixed to ensure index compatibility."
                 )
-                
+
                 st.text_input(
                     "Rerank Model (Read-only)",
                     value=current_config.get("rerank_model"),
                     disabled=True,
                     help="Currently fixed to ensure search optimization."
                 )
-            
+
             submitted = st.form_submit_button("Save Configuration", type="primary")
-            
+
             if submitted:
                 config_manager.set("chat_model", new_chat_model)
                 config_manager.set("ai_search_model", new_ai_search_model)
                 config_manager.set("vision_model", new_vision_model)
+                config_manager.set("semantic_split_model", new_semantic_split_model)
                 st.success("Configuration saved successfully!")
                 time.sleep(1)
                 st.rerun()

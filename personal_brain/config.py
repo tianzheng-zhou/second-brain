@@ -24,6 +24,13 @@ RERANK_MODEL = "qwen3-vl-rerank"
 VISION_MODEL = "qwen3-vl-plus"
 CHAT_MODEL = "qwen3-max"
 
+# Text Splitting Configuration
+# Use semantic-aware splitting (via LLM) or simple character-based splitting
+USE_SEMANTIC_SPLIT = os.getenv("USE_SEMANTIC_SPLIT", "false").lower() == "true"
+SEMANTIC_SPLIT_MODEL = os.getenv("SEMANTIC_SPLIT_MODEL", "qwen3.5-flash")  # Multimodal model for handling PDF with images
+CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1500"))
+CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
+
 # Aliyun OSS Configuration
 ALIYUN_ACCESS_KEY_ID = os.getenv("ALIYUN_ACCESS_KEY_ID")
 ALIYUN_ACCESS_KEY_SECRET = os.getenv("ALIYUN_ACCESS_KEY_SECRET")

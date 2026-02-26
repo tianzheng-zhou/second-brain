@@ -7,18 +7,654 @@ from pathlib import Path
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 from personal_brain.config import (
-    DASHSCOPE_API_KEY, 
-    DASHSCOPE_BASE_URL, 
+    DASHSCOPE_API_KEY,
+    DASHSCOPE_BASE_URL,
     EMBEDDING_DIMENSION,
-    STORAGE_PATH
+    STORAGE_PATH,
+    USE_SEMANTIC_SPLIT,
+    CHUNK_SIZE,
+    CHUNK_OVERLAP
 )
 from personal_brain.core.config_manager import config_manager
+from personal_brain.core.llm import call_llm
 from personal_brain.core.models import FileType
 from personal_brain.utils.aliyun_oss import AliyunOSS
 from personal_brain.utils.mineru import MinerUClient
 from personal_brain.utils.asr_client import ASRClient
 
-# Simple text splitter logic
+# Semantic-aware text splitter using LLM
+def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
+    """
+    Split text into semantically coherent chunks using LLM.
+
+    NEW APPROACH: Instead of asking LLM to count characters (which is unreliable),
+    we ask it to identify which paragraphs are good split boundaries based on
+    semantic content and topic transitions.
+
+    For documents with images (e.g., PDF), it preserves image boundaries and
+    ensures images are kept with their relevant textual context.
+
+    Chunk Size Range: Accepts chunks from 30% to 150% of target size to allow
+    flexible, semantically meaningful boundaries.
+
+    Note: Chunk overlap has been removed. Each chunk contains unique content.
+
+    Args:
+        text: Input text to split
+        image_root: Path to image folder (for PDF/markdown with images)
+        chunk_size: Target chunk size in characters
+        chunk_overlap: Deprecated - overlap is no longer applied between chunks
+
+    Returns:
+        List of text chunks with semantic coherence (no overlap)
+    """
+    if not text or len(text) <= chunk_size:
+        return [text.strip()] if text.strip() else []
+
+    # For very short text, no need to split
+    if len(text) < chunk_size * 0.8:
+        return [text.strip()]
+
+    try:
+        # Check if there are images in the text (markdown image syntax)
+        has_images = image_root is not None and re.search(r'!\[.*?\]\(.*?\)', text)
+
+        if has_images:
+            # Use multimodal prompt for documents with images
+            return _semantic_split_with_images(text, image_root, chunk_size, chunk_overlap)
+        else:
+            # Use text-only prompt for plain text documents
+            return _semantic_split_text_only(text, chunk_size, chunk_overlap)
+
+    except Exception as e:
+        # Fallback to recursive character splitter on any error
+        print(f"  Semantic splitting failed ({e}), falling back to character-based splitting...")
+        return recursive_character_text_splitter(text, chunk_size, chunk_overlap)
+
+
+def _semantic_split_text_only(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """
+    Semantic splitting for text-only documents.
+
+    KEY INSIGHT: Instead of asking LLM to count characters (which it's bad at),
+    we split text into semantic units (preserving tables, lists, code blocks),
+    then ask LLM which units are good split boundaries.
+    """
+
+    # Step 1: Split text into semantic units (preserving structural elements)
+    content_units, unit_boundaries = _split_into_semantic_units(text)
+
+    # If too few units, semantic splitting cannot proceed
+    if len(content_units) < 3:
+        raise Exception(f"Text too short for semantic splitting: only {len(content_units)} units found")
+
+    # Step 2: Ask LLM to identify which units are good split points
+    unit_previews = []
+    for i, u in enumerate(content_units):
+        preview = u[:80].replace('\n', ' ')
+        # Mark special content types
+        marker = ""
+        if u.strip().startswith('```'):
+            marker = "[代码块]"
+        elif u.strip().startswith('|'):
+            marker = "[表格]"
+        elif re.match(r'^\s*(\d+[.)]|[-*+])\s', u.strip()):
+            marker = "[列表]"
+        unit_previews.append(f"[{i}]{marker} {preview}... ({len(u)} 字)")
+
+    units_text = "\n".join(unit_previews)
+
+    analysis_prompt = f"""请分析以下内容单元列表，识别**好的分割边界**（主题转换处）。
+
+【任务】
+从以下单元中选择合适的分割点，使每个块在语义上独立完整。
+重要：**不要**在表格、代码块或列表中间分割，保持这些结构的完整性。
+
+【目标块大小】
+- 目标：约 {chunk_size} 字符
+- 最小：{int(chunk_size * 0.5)} 字符（低于此值的块会被合并）
+- 最大：{int(chunk_size * 1.5)} 字符
+
+【选择标准 - 优先级从高到低】
+1. **主题转换**：不同主题/领域之间（如从"安装步骤"转到"配置说明"）
+2. **章节边界**：明确的章节、小节结束处
+3. **逻辑完整**：一个完整步骤、功能说明或概念论述结束后
+
+【特别注意事项】
+- 带有[表格]标记的单元必须在同一chunk中保持完整
+- 带有[代码块]标记的单元不要拆开
+- 连续的[列表]项应尽可能保持在同一块中
+
+【避免选择】
+- 表格、代码块、列表的中间位置
+- 同一主题或步骤内部的单元之间
+- 因果关系紧密的内容之间
+
+【输出格式】
+只返回单元编号，用逗号分隔。例如：2, 5, 8
+表示在第2单元后、第5单元后、第8单元后分割。
+如果不确定，返回最明确的主题转换点，宁少勿多。
+
+内容单元列表（共 {len(content_units)} 个）：
+{units_text}
+
+分割点（只返回数字，用逗号分隔）："""
+
+    # Get semantic split model from dynamic config
+    semantic_split_model = config_manager.get("semantic_split_model", "qwen3.5-flash")
+
+    response = call_llm(
+        model=semantic_split_model,
+        messages=[
+            {"role": "user", "content": analysis_prompt}
+        ],
+        # Thinking mode disabled by default for speed
+        enable_thinking=False
+    )
+
+    # Parse paragraph indices from response
+    split_indices_str = response.choices[0].message.content.strip()
+
+    # Enhanced parsing: extract numbers, handling various formats
+    # Look for standalone numbers or numbers followed by punctuation
+    numbers = re.findall(r'\b\d+\b', split_indices_str)
+    split_paragraph_indices = sorted([int(n) for n in numbers])
+
+    # Validate indices are within reasonable range
+    split_paragraph_indices = [idx for idx in split_paragraph_indices if 0 <= idx < len(unit_boundaries)]
+
+    # Remove duplicates while preserving order
+    seen = set()
+    split_paragraph_indices = [x for x in split_paragraph_indices if not (x in seen or seen.add(x))]
+
+    # Step 3: Convert paragraph indices to character positions with intelligent merging
+    # This is the KEY: WE calculate positions, not the LLM!
+    valid_splits = []
+    min_chunk_size = int(chunk_size * 0.5)  # Increased minimum to reduce small chunks
+    max_chunk_size = int(chunk_size * 1.5)
+
+    for idx in split_paragraph_indices:
+        if 0 <= idx < len(unit_boundaries):
+            # Get the end position of this paragraph
+            _, end_pos, _ = unit_boundaries[idx]
+
+            # Validate: ensure reasonable chunk sizes
+            if len(valid_splits) > 0:
+                prev_split = valid_splits[-1]
+                chunk_len = end_pos - prev_split
+                if chunk_len < min_chunk_size:
+                    # Too small, skip this split (will be merged with next)
+                    continue
+                if chunk_len > max_chunk_size:
+                    # Too large, accept anyway but warn (better than bad split)
+                    pass
+            else:
+                # First split: ensure first chunk isn't too small
+                if end_pos < min_chunk_size:
+                    continue  # First chunk would be too small
+
+            # Ensure not too close to the end (leave at least 20% for last chunk)
+            remaining = len(text) - end_pos
+            if remaining < min_chunk_size * 0.5:
+                # Don't split here, let the rest be part of previous chunk
+                continue
+
+            valid_splits.append(end_pos)
+
+    # If no valid splits from LLM or too few, add fallback splits
+    if len(valid_splits) == 0:
+        # Generate automatic splits based on chunk size
+        current_pos = 0
+        while current_pos + chunk_size < len(text):
+            # Find the nearest paragraph boundary after target position
+            target_pos = current_pos + chunk_size
+            best_split = None
+            for start, end, idx in unit_boundaries:
+                if end >= target_pos - chunk_size * 0.3 and end <= target_pos + chunk_size * 0.3:
+                    if end > current_pos and (best_split is None or abs(end - target_pos) < abs(best_split - target_pos)):
+                        best_split = end
+            if best_split and best_split not in valid_splits:
+                valid_splits.append(best_split)
+                current_pos = best_split
+            else:
+                # No good boundary found, move forward
+                current_pos = target_pos
+
+    if not valid_splits:
+        raise Exception("No valid split points could be determined")
+
+    # Step 4: Create chunks using the validated split positions
+    chunks = []
+    prev = 0
+    for split_pos in valid_splits:
+        chunk = text[prev:split_pos].strip()
+        if chunk:
+            chunks.append(chunk)
+        prev = split_pos
+
+    if prev < len(text):
+        chunk = text[prev:].strip()
+        if chunk:
+            chunks.append(chunk)
+
+    # Step 5: Post-process
+    return _postprocess_chunks(chunks, chunk_size, chunk_overlap)
+
+
+def _semantic_split_with_images(text: str, image_root: Path, chunk_size: int, chunk_overlap: int) -> list[str]:
+    """
+    Semantic splitting for documents with images (PDF, markdown with figures).
+
+    KEY INSIGHT: Instead of asking LLM to count characters, we:
+    1. Split into paragraphs (keeping images with their context)
+    2. Ask LLM which paragraphs are good split boundaries
+    3. Calculate actual positions ourselves
+
+    Preserves image-text relationships by keeping images with their context.
+    """
+
+    # Step 1: Split text into paragraphs, but keep image blocks intact
+    # Image blocks include: the image markdown + caption paragraph
+    paragraphs = re.split(r'(\n\n+)', text)
+
+    # Group paragraphs into "semantic units"
+    # A unit can be: [text], [image + caption], [text + image reference]
+    content_units = []
+    unit_boundaries = []  # (start_char, end_char, unit_index)
+
+    current_pos = 0
+    image_pattern = r'!\[.*?\]\(.*?\)'
+
+    i = 0
+    while i < len(paragraphs):
+        p = paragraphs[i]
+
+        if not p.strip():
+            current_pos += len(p)
+            i += 1
+            continue
+
+        unit_start = current_pos
+        unit_content = [p]
+        current_pos += len(p)
+
+        # Check if this paragraph contains or references an image
+        has_image = re.search(image_pattern, p)
+        is_caption = has_image  # Paragraph with image is likely a caption
+
+        # Look ahead: check if next paragraph is an image or caption
+        j = i + 1
+        while j < len(paragraphs) - 1:
+            next_p = paragraphs[j]
+            next_next_p = paragraphs[j + 1] if j + 1 < len(paragraphs) else ""
+
+            # Skip separators
+            if not next_p.strip():
+                j += 1
+                continue
+
+            # Check if next is an image
+            if re.search(image_pattern, next_p):
+                unit_content.append(next_p)
+                current_pos += len(paragraphs[j])
+                j += 1
+
+                # Also include caption after image
+                if j < len(paragraphs) and paragraphs[j].strip():
+                    if len(paragraphs[j]) < 200:  # Caption is usually short
+                        unit_content.append(paragraphs[j])
+                        current_pos += len(paragraphs[j])
+                        j += 1
+                break
+
+            # Check if current paragraph has image and next is caption
+            if has_image and len(next_p) < 200 and not re.search(image_pattern, next_p):
+                # Likely a caption
+                unit_content.append(next_p)
+                current_pos += len(paragraphs[j])
+                j += 1
+                break
+
+            # No image relationship, stop grouping
+            break
+
+        i = j
+
+        unit_end = current_pos
+        content_units.append("".join(unit_content))
+        unit_boundaries.append((unit_start, unit_end, len(content_units) - 1))
+
+    # If too few units, semantic splitting cannot proceed
+    if len(content_units) < 3:
+        raise Exception(f"Text too short for semantic splitting: only {len(content_units)} units found")
+
+    # Step 2: Ask LLM to identify split points by unit index
+    unit_previews = []
+    for i, u in enumerate(content_units):
+        preview = u[:100].replace('\n', ' ')
+        has_img = "[图片]" if re.search(image_pattern, u) else ""
+        unit_previews.append(f"[{i}]{has_img} {preview}... ({len(u)} 字)")
+
+    units_text = "\n".join(unit_previews)
+
+    analysis_prompt = f"""请分析以下文档单元列表（包含文本和图片），识别**好的分割边界**（主题转换处）。
+
+【任务】
+从以下单元中选择合适的分割点，使每个块在语义上独立完整。**保持图片与其说明文字在同一块中**。
+
+【目标块大小】
+- 目标：约 {chunk_size} 字符
+- 最小：{int(chunk_size * 0.5)} 字符（低于此值的块会被合并）
+- 最大：{int(chunk_size * 1.5)} 字符
+
+【选择标准 - 优先级从高到低】
+1. **主题转换**：不同主题/领域之间（如从"医疗"转到"教育"）
+2. **章节边界**：明确的章节、小节结束处
+3. **逻辑完整**：一个完整概念论述结束后
+4. **图片边界**：优先在图片单元之前或之后分割，不在图片单元中间分割
+
+【避免选择】
+- 同一主题内部的段落之间
+- 因果关系紧密的段落之间
+- 图片与其说明文字之间
+- 连续的例子或并列说明中间
+
+【输出格式】
+只返回单元编号，用逗号分隔。例如：2, 5, 8
+表示在第2单元后、第5单元后、第8单元后分割。
+如果不确定，返回最明确的主题转换点，宁少勿多。
+
+文档单元列表（共 {len(content_units)} 单元，[图片]标记表示包含图片）：
+{units_text}
+
+分割点（只返回数字，用逗号分隔）："""
+
+    # Get semantic split model from dynamic config
+    semantic_split_model = config_manager.get("semantic_split_model", "qwen3.5-flash")
+
+    response = call_llm(
+        model=semantic_split_model,
+        messages=[
+            {"role": "user", "content": analysis_prompt}
+        ],
+        # Thinking mode disabled by default for speed
+        enable_thinking=False
+    )
+
+    # Parse unit indices from response
+    split_indices_str = response.choices[0].message.content.strip()
+
+    # Enhanced parsing: extract numbers, handling various formats
+    numbers = re.findall(r'\b\d+\b', split_indices_str)
+    split_unit_indices = sorted([int(n) for n in numbers])
+
+    # Validate indices are within reasonable range
+    split_unit_indices = [idx for idx in split_unit_indices if 0 <= idx < len(unit_boundaries)]
+
+    # Remove duplicates while preserving order
+    seen = set()
+    split_unit_indices = [x for x in split_unit_indices if not (x in seen or seen.add(x))]
+
+    # Step 3: Convert unit indices to character positions with intelligent merging
+    valid_splits = []
+    min_chunk_size = int(chunk_size * 0.5)  # Increased minimum to reduce small chunks
+    max_chunk_size = int(chunk_size * 1.5)
+
+    for idx in split_unit_indices:
+        if 0 <= idx < len(unit_boundaries):
+            _, end_pos, _ = unit_boundaries[idx]
+
+            # Validate: ensure reasonable chunk sizes
+            if len(valid_splits) > 0:
+                prev_split = valid_splits[-1]
+                chunk_len = end_pos - prev_split
+                if chunk_len < min_chunk_size:
+                    continue  # Too small, skip this split
+                if chunk_len > max_chunk_size:
+                    pass  # Too large, accept anyway
+            else:
+                if end_pos < min_chunk_size:
+                    continue  # First chunk would be too small
+
+            # Ensure not too close to the end
+            remaining = len(text) - end_pos
+            if remaining < min_chunk_size * 0.5:
+                continue
+
+            valid_splits.append(end_pos)
+
+    # If no valid splits or too few, add fallback splits
+    if len(valid_splits) == 0:
+        # Generate automatic splits based on chunk size
+        current_pos = 0
+        while current_pos + chunk_size < len(text):
+            target_pos = current_pos + chunk_size
+            best_split = None
+            for start, end, idx in unit_boundaries:
+                if end >= target_pos - chunk_size * 0.3 and end <= target_pos + chunk_size * 0.3:
+                    if end > current_pos and (best_split is None or abs(end - target_pos) < abs(best_split - target_pos)):
+                        best_split = end
+            if best_split and best_split not in valid_splits:
+                valid_splits.append(best_split)
+                current_pos = best_split
+            else:
+                current_pos = target_pos
+
+    if not valid_splits:
+        raise Exception("No valid split points could be determined for document with images")
+
+    # Step 4: Create chunks
+    chunks = []
+    prev = 0
+    for split_pos in valid_splits:
+        chunk = text[prev:split_pos].strip()
+        if chunk:
+            chunks.append(chunk)
+        prev = split_pos
+
+    if prev < len(text):
+        chunk = text[prev:].strip()
+        if chunk:
+            chunks.append(chunk)
+
+    return _postprocess_chunks(chunks, chunk_size, chunk_overlap)
+
+
+def _postprocess_chunks(chunks: list[str], chunk_size: int, chunk_overlap: int) -> list[str]:
+    """
+    Post-process chunks: merge small ones.
+
+    Note: Overlap between chunks has been removed to avoid content duplication.
+    Each chunk now contains unique, non-overlapping content.
+
+    Key logic:
+    1. Merge small chunks with the PREVIOUS chunk to preserve forward context
+    2. Handle the first chunk specially - merge with next if too small
+    """
+
+    if not chunks:
+        return chunks
+
+    # Step 1: Merge very small chunks
+    # Strategy: iterate backwards and merge small chunks with previous
+    # This preserves the "forward-looking" nature of chunks
+    final_chunks = []
+
+    for i, chunk in enumerate(chunks):
+        # Skip empty chunks
+        if not chunk.strip():
+            continue
+
+        # Check if this chunk is too small
+        is_too_small = len(chunk) < chunk_size * 0.4
+
+        if is_too_small:
+            if final_chunks:
+                # Merge with previous chunk (preferred)
+                final_chunks[-1] += "\n\n" + chunk
+            elif i < len(chunks) - 1:
+                # First chunk is small - merge with next
+                # But don't add to final_chunks yet, wait for next iteration
+                # Store as "pending merge"
+                final_chunks.append(chunk)  # Will be merged with next
+            else:
+                # Last chunk and small - just add it
+                final_chunks.append(chunk)
+        else:
+            # Check if previous chunk was small and needs merging
+            if final_chunks and len(final_chunks[-1]) < chunk_size * 0.4:
+                # Previous was small, merge current with it
+                prev_small = final_chunks.pop()
+                final_chunks.append(prev_small + "\n\n" + chunk)
+            else:
+                final_chunks.append(chunk)
+
+    # Step 2: If first chunk is still too small, merge with second
+    while len(final_chunks) > 1 and len(final_chunks[0]) < chunk_size * 0.5:
+        if len(final_chunks) >= 2:
+            second = final_chunks.pop(1)
+            final_chunks[0] += "\n\n" + second
+
+    # Step 3: Return chunks WITHOUT overlap
+    # Note: Overlap has been removed to avoid content duplication between chunks
+    # Each chunk now contains unique, non-overlapping content
+    return final_chunks
+
+
+def _split_into_semantic_units(text: str) -> tuple[list[str], list[tuple[int, int, int]]]:
+    """
+    Split text into semantic units, preserving structural elements like tables,
+    code blocks, and lists.
+
+    Returns:
+        Tuple of (content_units, unit_boundaries)
+        unit_boundaries: list of (start_char, end_char, unit_index)
+    """
+    # Pattern for structural elements that should not be split
+    # 1. Markdown tables (lines starting with | containing |)
+    # 2. Code blocks (```...```)
+    # 3. Numbered lists (1. 2. etc.)
+    # 4. Bullet lists (- * +)
+
+    # Split text into lines while preserving line structure
+    if '\r\n' in text:
+        lines = text.split('\r\n')
+        line_ending = '\r\n'
+    else:
+        lines = text.split('\n')
+        line_ending = '\n'
+
+    units = []
+    boundaries = []
+    current_pos = 0
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Check for code block
+        if line.strip().startswith('```'):
+            # Collect entire code block
+            code_block = [line]
+            start_line_idx = i
+            i += 1
+            while i < len(lines) and not lines[i].strip().startswith('```'):
+                code_block.append(lines[i])
+                i += 1
+            if i < len(lines):
+                code_block.append(lines[i])
+                i += 1
+            # Calculate exact position in original text
+            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
+            # For the last line, don't add line ending
+            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
+            unit_content = line_ending.join(code_block)
+            units.append(unit_content)
+            boundaries.append((start, end, len(units) - 1))
+            current_pos = end
+            continue
+
+        # Check for markdown table
+        if line.strip().startswith('|') and '|' in line[1:]:
+            # Collect entire table
+            table_lines = [line]
+            start_line_idx = i
+            i += 1
+            while i < len(lines) and lines[i].strip().startswith('|'):
+                table_lines.append(lines[i])
+                i += 1
+            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
+            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
+            unit_content = line_ending.join(table_lines)
+            units.append(unit_content)
+            boundaries.append((start, end, len(units) - 1))
+            current_pos = end
+            continue
+
+        # Check for list items (numbered or bullet)
+        list_pattern = r'^\s*(\d+[.)]|[-*+])\s'
+        if re.match(list_pattern, line):
+            # Collect related list items (consecutive list items with similar indentation)
+            list_items = [line]
+            base_indent = len(line) - len(line.lstrip())
+            start_line_idx = i
+            i += 1
+            while i < len(lines):
+                next_line = lines[i]
+                if not next_line.strip():
+                    # Empty line - check if next non-empty line is a list item
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and re.match(list_pattern, lines[j]):
+                        # Add empty lines between list items
+                        while i < j:
+                            list_items.append(lines[i])
+                            i += 1
+                        list_items.append(lines[i])
+                        i += 1
+                        continue
+                    break
+                elif re.match(list_pattern, next_line):
+                    list_items.append(next_line)
+                    i += 1
+                elif next_line.strip() and len(next_line) - len(next_line.lstrip()) > base_indent:
+                    # Indented continuation of list item
+                    list_items.append(next_line)
+                    i += 1
+                else:
+                    break
+            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
+            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
+            unit_content = line_ending.join(list_items)
+            units.append(unit_content)
+            boundaries.append((start, end, len(units) - 1))
+            current_pos = end
+            continue
+
+        # Regular paragraph - collect consecutive non-empty lines
+        if line.strip():
+            para_lines = [line]
+            start_line_idx = i
+            i += 1
+            while i < len(lines) and lines[i].strip():
+                # Check if next line starts a special block
+                if lines[i].strip().startswith('```') or lines[i].strip().startswith('|') or re.match(list_pattern, lines[i]):
+                    break
+                para_lines.append(lines[i])
+                i += 1
+            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
+            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
+            unit_content = line_ending.join(para_lines)
+            units.append(unit_content)
+            boundaries.append((start, end, len(units) - 1))
+            current_pos = end
+        else:
+            # Empty line - just advance position
+            current_pos += len(line) + len(line_ending)
+            i += 1
+
+    return units, boundaries
 def recursive_character_text_splitter(text: str, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
     """
     Split text into chunks of specified size with overlap.
@@ -604,7 +1240,7 @@ def generate_embedding_chunks(text: str, image_root: Path = None):
     """
     if not text:
         return [], []
-        
+
     if not dashscope.api_key:
         print("Error: DASHSCOPE_API_KEY not set.")
         return [], []
@@ -612,15 +1248,25 @@ def generate_embedding_chunks(text: str, image_root: Path = None):
     chunks = []
     inputs = []
 
+    # Get semantic split model from dynamic config
+    semantic_split_model = config_manager.get("semantic_split_model", "qwen3.5-flash")
+
     if image_root:
-        # Multimodal splitting
-        print("Using Multimodal Splitter...")
-        chunks, inputs = markdown_multimodal_splitter(text, image_root)
+        # For documents with images (PDF), always use semantic splitter that preserves image context
+        # The semantic splitter uses the configured model to analyze structure and keep images with their context
+        print(f"Using Semantic Splitter for document with images (model: {semantic_split_model})...")
+        chunks = semantic_text_splitter(text, image_root=image_root, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        inputs = chunks
+    elif USE_SEMANTIC_SPLIT:
+        # Semantic-aware splitting using LLM (for text-only documents)
+        print(f"Using Semantic Splitter (model: {semantic_split_model})...")
+        chunks = semantic_text_splitter(text, image_root=None, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        inputs = chunks
     else:
-        # Use recursive splitter
-        chunks = recursive_character_text_splitter(text, chunk_size=1500, chunk_overlap=200)
-        inputs = chunks # Inputs are just strings
-        
+        # Use recursive character-based splitter (default for text-only)
+        chunks = recursive_character_text_splitter(text, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        inputs = chunks  # Inputs are just strings
+
     total_chunks = len(chunks)
     print(f"Split into {total_chunks} chunks. Starting parallel embedding generation...")
     

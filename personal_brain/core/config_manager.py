@@ -15,6 +15,10 @@ DEFAULT_CONFIG = {
     "embedding_model": "qwen3-vl-embedding",
     "rerank_model": "qwen3-vl-rerank",
     "embedding_batch_size": 2,
+    "use_semantic_split": False,  # Whether to use LLM-based semantic splitting
+    "semantic_split_model": "qwen3.5-flash",  # Multimodal model for handling PDF with images
+    "chunk_size": 1500,  # Target chunk size in characters
+    "chunk_overlap": 200,  # Overlap between consecutive chunks
 }
 
 class ConfigManager:

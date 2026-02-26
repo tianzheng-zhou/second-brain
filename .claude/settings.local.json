@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(Out-File:*)",
+      "Bash(Get-Content:*)"
+    ]
+  }
+}
