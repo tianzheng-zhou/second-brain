@@ -39,10 +39,10 @@ def main():
     print("Starting Chainlit app...")
     
     # Use chainlit module execution
-    # python -m chainlit run chainlit_app.py -w
+    # python -m chainlit run chainlit_app.py -w --host 0.0.0.0
     target_script = project_root / "chainlit_app.py"
     
-    cmd = [sys.executable, "-m", "chainlit", "run", str(target_script), "-w"]
+    cmd = [sys.executable, "-m", "chainlit", "run", str(target_script), "-w", "--host", "0.0.0.0"]
     
     try:
         subprocess.run(cmd, check=True)

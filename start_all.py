@@ -20,7 +20,7 @@ def main():
     admin_process = subprocess.Popen([python_exe, "start_admin.py"])
     
     print("\n✅ Services are running in the background!")
-    print(f"   - 💬 User Chat:  http://localhost:8000")
+    print(f"   - 💬 User Chat:  http://0.0.0.0:8000 (accessible via LAN IP)")
     print(f"   - 🛠️ Admin Dash: http://localhost:8502")
     print("\n(Press Ctrl+C in this terminal to stop all services)")
     
