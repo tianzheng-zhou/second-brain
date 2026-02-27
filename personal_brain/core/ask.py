@@ -3,27 +3,37 @@ from personal_brain.core.llm import call_llm
 from personal_brain.core.tools import TOOL_DEFINITIONS, AVAILABLE_TOOLS
 from personal_brain.core.database import log_agent_action
 
-def ask_brain(query: str, history: list = None, stream: bool = True, conversation_id: str = None):
+def ask_brain(query: str, history: list = None, stream: bool = True, conversation_id: str = None, force_retrieve: bool = False):
     """
     Agent-based ask brain.
+
+    Args:
+        force_retrieve: If True, forces the agent to search the database before answering.
+                       Use this when user asks about their knowledge base content.
     """
-    messages = [{"role": "system", "content": """You are PersonalBrain. 
+    force_retrieve_instruction = f"""
+    \n\n🔍 **IMPORTANT**: The user is asking about their knowledge base. You MUST call `search_semantic` with query="{query}" before answering. Do NOT answer from your general knowledge - search the database first and only answer based on what you find.""" if force_retrieve else ""
+
+    messages = [{"role": "system", "content": f"""You are PersonalBrain.
     Core Capabilities:
-    1. **Memory**: Store important information, files, and conversations using `write_entry`. 
+    1. **Memory**: Store important information, files, and conversations using `write_entry`.
        - If the user uploads files (you see file paths in context), use `write_entry(content=..., file_paths=[...])` to save them.
        - Always summarize what you are saving.
        - You can control graph extraction with `save_to_graph`. Default is True.
-    2. **Retrieval**: 
+    2. **Retrieval**:
        - Use `search_semantic` for natural language queries.
-         - IMPORTANT: If user mentions a time range (e.g., "last week"), try to convert it to ISO8601 `time_range_start` and `time_range_end`.
+         - **IMPORTANT**: Extract concise search keywords from user's question rather than using the full sentence.
+           Example: User asks "什么是微积分中的导数" → Use query="微积分 导数 定义"
+         - If user mentions a time range (e.g., "last week"), try to convert it to ISO8601 `time_range_start` and `time_range_end`.
          - Use `entry_type` to filter ('file', 'text', 'mixed') if user specifically asks for files or notes.
        - Use `search_graph` for entity-specific queries (e.g. "who is Zhang San", "projects related to Rust").
     3. **Maintenance**:
        - Use `update_entry` to modify existing entries if user corrects you or adds details.
 
-    IMPORTANT: 
+    IMPORTANT:
     - If a tool returns 'confirmation_needed', you MUST ask the user for confirmation clearly and explicitly.
-    - When answering based on search results, cite the sources."""}]
+    - When answering based on search results, cite the sources.
+    - **CRITICAL**: Before answering ANY question about what the user has stored/uploaded/saved, you MUST search the database first. Never say "I don't have access to..." without trying `search_semantic` first.{force_retrieve_instruction}"""}]
     
     # Filter history to remove Tool messages if any (to keep context clean for now, or keep them?)
     # OpenAI requires Tool messages to follow Tool Calls.

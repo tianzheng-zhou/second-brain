@@ -661,7 +661,7 @@ def get_entity_relations(entity_id: str):
     cursor = conn.cursor()
     try:
         cursor.execute("""
-            SELECT r.*, e1.name as source_name, e2.name as target_name 
+            SELECT r.*, e1.name as source_name, e2.name as target_name
             FROM relations r
             JOIN entities e1 ON r.source = e1.id
             JOIN entities e2 ON r.target = e2.id
@@ -671,6 +671,238 @@ def get_entity_relations(entity_id: str):
         return [dict(row) for row in rows]
     finally:
         conn.close()
+
+def get_all_entities(limit: int = 1000):
+    """
+    Get all entities from the knowledge graph.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM entities ORDER BY mention_count DESC LIMIT ?", (limit,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching all entities: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_all_relations(limit: int = 5000):
+    """
+    Get all relations from the knowledge graph with entity names.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT r.*, e1.name as source_name, e2.name as target_name
+            FROM relations r
+            JOIN entities e1 ON r.source = e1.id
+            JOIN entities e2 ON r.target = e2.id
+            LIMIT ?
+        """, (limit,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching all relations: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_entity_types_count():
+    """
+    Get count of entities by type.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT type, COUNT(*) as count FROM entities GROUP BY type")
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching entity type counts: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_entity_by_id(entity_id: str):
+    """
+    Get a single entity by ID.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT * FROM entities WHERE id = ?", (entity_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"Error fetching entity by ID: {e}")
+        return None
+    finally:
+        conn.close()
+
+def get_relations_by_file(file_id: str):
+    """
+    Get all relations that originated from a specific file.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT r.*, e1.name as source_name, e2.name as target_name
+            FROM relations r
+            JOIN entities e1 ON r.source = e1.id
+            JOIN entities e2 ON r.target = e2.id
+            WHERE r.file_id = ?
+        """, (file_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching relations by file: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_file_entity_relations():
+    """
+    Get all file-entity relationships for building file-file association graph.
+    Returns: list of {file_id, entity_id, entity_name, entity_type}
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT DISTINCT r.file_id, e.id as entity_id, e.name as entity_name, e.type as entity_type
+            FROM relations r
+            JOIN entities e ON (r.source = e.id OR r.target = e.id)
+            WHERE r.file_id IS NOT NULL
+        """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching file-entity relations: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_files_with_shared_entities():
+    """
+    Find files that share common entities.
+    Returns: list of {file1_id, file2_id, shared_entity_count, shared_entities}
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            WITH file_entities AS (
+                SELECT DISTINCT r.file_id, e.id as entity_id, e.name as entity_name
+                FROM relations r
+                JOIN entities e ON (r.source = e.id OR r.target = e.id)
+                WHERE r.file_id IS NOT NULL
+            )
+            SELECT
+                fe1.file_id as file1_id,
+                fe2.file_id as file2_id,
+                COUNT(*) as shared_count,
+                GROUP_CONCAT(fe1.entity_name, ', ') as shared_entities
+            FROM file_entities fe1
+            JOIN file_entities fe2 ON fe1.entity_id = fe2.entity_id AND fe1.file_id < fe2.file_id
+            GROUP BY fe1.file_id, fe2.file_id
+            HAVING shared_count > 0
+            ORDER BY shared_count DESC
+        """)
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching files with shared entities: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_entities_by_file(file_id: str):
+    """
+    Get all entities mentioned in a specific file.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("""
+            SELECT DISTINCT e.*
+            FROM entities e
+            JOIN relations r ON (e.id = r.source OR e.id = r.target)
+            WHERE r.file_id = ?
+        """, (file_id,))
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        print(f"Error fetching entities by file: {e}")
+        return []
+    finally:
+        conn.close()
+
+def delete_relations_by_file(file_id: str):
+    """
+    Delete all relations associated with a specific file.
+    Returns the number of deleted relations.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM relations WHERE file_id = ?", (file_id,))
+        deleted_count = cursor.rowcount
+        conn.commit()
+        print(f"Deleted {deleted_count} relations for file {file_id}")
+        return deleted_count
+    except Exception as e:
+        print(f"Error deleting relations for file {file_id}: {e}")
+        return 0
+    finally:
+        conn.close()
+
+def cleanup_orphaned_entities():
+    """
+    Delete entities that are no longer referenced by any relation.
+    Returns the number of deleted entities.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        # Find entities with no relations (as source or target)
+        cursor.execute("""
+            DELETE FROM entities
+            WHERE id NOT IN (
+                SELECT DISTINCT source FROM relations
+                UNION
+                SELECT DISTINCT target FROM relations
+            )
+        """)
+        deleted_count = cursor.rowcount
+        conn.commit()
+        if deleted_count > 0:
+            print(f"Cleaned up {deleted_count} orphaned entities")
+        return deleted_count
+    except Exception as e:
+        print(f"Error cleaning up orphaned entities: {e}")
+        return 0
+    finally:
+        conn.close()
+
+def delete_file_knowledge_graph(file_id: str):
+    """
+    Delete all knowledge graph data (relations and orphaned entities) for a file.
+    This is used when reindexing to rebuild the knowledge graph from scratch.
+    """
+    # Step 1: Delete all relations for this file
+    deleted_relations = delete_relations_by_file(file_id)
+
+    # Step 2: Clean up entities that are no longer referenced
+    deleted_entities = cleanup_orphaned_entities()
+
+    return {
+        "deleted_relations": deleted_relations,
+        "deleted_entities": deleted_entities
+    }
 
 def save_conversation(conversation: dict):
     """Save or update a conversation metadata."""

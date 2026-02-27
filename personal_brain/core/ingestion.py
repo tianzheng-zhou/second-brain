@@ -5,7 +5,7 @@ from personal_brain.core.models import File, FileType, FileStatus
 from personal_brain.utils.file_ops import calculate_file_id, get_file_type, organize_file
 from personal_brain.core.indexer import extract_text, generate_embedding_chunks, generate_embedding
 from personal_brain.core.cleaner import calculate_trash_score
-from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding, get_db_connection
+from personal_brain.core.database import save_file, save_chunks, get_file, save_embedding, get_db_connection, delete_file_knowledge_graph
 
 def process_file(file_path: Path) -> bool:
     """Process a single file. Returns True if successful."""
@@ -80,25 +80,25 @@ def process_file(file_path: Path) -> bool:
 def refresh_index_for_file(file_id: str):
     """
     Refresh the index for a specific file.
-    Re-extracts text and regenerates embedding.
+    Re-extracts text, regenerates embedding, and rebuilds knowledge graph.
     """
     try:
         file_data = get_file(file_id)
         if not file_data:
             print(f"File {file_id} not found.")
             return False
-            
+
         file_path = Path(file_data['path'])
         if not file_path.exists():
             print(f"File path {file_path} does not exist.")
             return False
-            
+
         print(f"Refreshing index for {file_path.name}...")
-        
+
         # 1. Re-extract text
         file_type = get_file_type(file_path)
         text, image_root = extract_text(file_path, file_type)
-        
+
         # Check if text extraction failed
         if not text and file_type == FileType.PDF:
             print(f"Text extraction failed for {file_path.name}. Aborting refresh.")
@@ -107,24 +107,61 @@ def refresh_index_for_file(file_id: str):
         # 2. Update DB record with new text
         conn = get_db_connection()
         cursor = conn.cursor()
-        
+
         # Calculate trash score (Dummy for now, or fetch logic)
-        trash_score = 0.5 
-        
+        trash_score = 0.5
+
         cursor.execute("UPDATE files SET ocr_text = ?, trash_score = ? WHERE id = ?", (text, trash_score, file_id))
         conn.commit()
         conn.close()
-        
+
         # 3. Regenerate chunks and embeddings
+        chunks = []
+        embeddings = []
         if text:
             print("Regenerating embedding chunks...")
             chunks, embeddings = generate_embedding_chunks(text, image_root)
             if chunks and embeddings:
                 save_chunks(file_id, chunks, embeddings)
-                
+
+        # 4. Rebuild Knowledge Graph (DELETE OLD + EXTRACT NEW)
+        print("Rebuilding knowledge graph...")
+        try:
+            # 4.1 Delete old KG data for this file
+            deletion_result = delete_file_knowledge_graph(file_id)
+            print(f"  Deleted {deletion_result['deleted_relations']} relations, {deletion_result['deleted_entities']} orphaned entities")
+
+            # 4.2 Re-extract entities and relations
+            if text and chunks and embeddings:
+                from personal_brain.core.enrichment import enrich_file
+
+                # Recreate File object for enrichment
+                file_obj = File(
+                    id=file_id,
+                    path=str(file_path),
+                    filename=file_path.name,
+                    type=file_type,
+                    size_bytes=file_path.stat().st_size,
+                    created_at=datetime.fromtimestamp(file_path.stat().st_ctime),
+                    last_accessed=datetime.fromtimestamp(file_path.stat().st_atime),
+                    status=FileStatus.ACTIVE,
+                    ocr_text=text,
+                    trash_score=trash_score
+                )
+
+                # Run enrichment to extract new entities
+                enrich_file(file_obj, text, chunks, embeddings)
+                print("  Knowledge graph rebuilt successfully")
+            else:
+                print("  No text/chunks available, skipping KG extraction")
+
+        except Exception as kg_e:
+            print(f"  Warning: Knowledge graph rebuild failed: {kg_e}")
+            # Continue even if KG rebuild fails - the embeddings are still updated
+
         print(f"Refresh complete for {file_path.name}")
         return True
-        
+
     except Exception as e:
         print(f"Error refreshing file {file_id}: {e}")
         return False

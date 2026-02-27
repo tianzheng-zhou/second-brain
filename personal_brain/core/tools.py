@@ -432,7 +432,7 @@ TOOL_DEFINITIONS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The search query"},
+                    "query": {"type": "string", "description": "搜索关键词。提取用户问题的核心实体词（如'微分 导数 定义'），不要包含礼貌用语或完整问句"},
                     "time_hint": {"type": "string", "description": "Optional time filter (e.g. 'last month')"},
                     "time_range_start": {"type": "string", "description": "ISO8601 start date"},
                     "time_range_end": {"type": "string", "description": "ISO8601 end date"},

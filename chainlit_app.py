@@ -16,7 +16,7 @@ from personal_brain.core.chainlit_datalayer import SQLiteDataLayer
 from personal_brain.core.ask import ask_brain
 from personal_brain.core.ingestion import ingest_path
 from personal_brain.core.database import (
-    get_all_files, 
+    get_all_files,
     delete_file_record,
     save_conversation,
     get_db_connection
@@ -124,7 +124,7 @@ async def auth_callback(username, password):
             # Create user if not exists
             temp_user = cl.User(identifier=username)
             persisted_user = await cl_data_layer.create_user(temp_user)
-        
+
         # Return User with STABLE ID from database
         # This ensures threads are linked to the same user across sessions
         user = cl.User(identifier=username)
@@ -137,11 +137,11 @@ async def auth_callback(username, password):
             else:
                 # Fallback if id is not a direct attribute (unlikely in Chainlit)
                 object.__setattr__(user, "id", persisted_user.id)
-            
+
             # Update metadata if needed
             if hasattr(user, "metadata"):
                 user.metadata = persisted_user.metadata
-                
+
         return user
     # print(f"[DEBUG] Auth failed for user: {username}")
     return None
@@ -151,7 +151,7 @@ async def start():
     """Initialize the chat session."""
     # Initialize empty history for LLM context
     cl.user_session.set("history", [])
-    
+
     # Save conversation metadata
     session_id = cl.context.session.id
     save_conversation({
@@ -159,10 +159,10 @@ async def start():
         "title": "New Chat", # TODO: Generate title
         "summary": "New conversation started."
     })
-    
+
     # Display welcome message
     await cl.Message(content="👋 Welcome to **PersonalBrain**! \n\nUpload files to add them to your knowledge base, or ask questions to search your notes.").send()
-    
+
     # User is already handled in auth_callback, no need to re-check here
 
 @cl.on_chat_resume
@@ -171,21 +171,21 @@ async def on_chat_resume(thread: cl.types.ThreadDict):
     # Rebuild history for LLM context from the thread steps
     history = []
     # print(f"[DEBUG] on_chat_resume thread keys: {thread.keys()}")
-    
+
     # Check if 'steps' is in thread, if not, try to fetch it or use empty
     steps = thread.get("steps", [])
-    
+
     for step in steps:
         # Only include messages in context, not tool outputs or other steps
         if step["type"] == "user_message":
             history.append({"role": "user", "content": step["output"]})
         elif step["type"] == "assistant_message":
             history.append({"role": "assistant", "content": step["output"]})
-    
+
     # Keep only last 10 turns (20 messages) to avoid token limit
     if len(history) > 20:
         history = history[-20:]
-        
+
     cl.user_session.set("history", history)
     # print(f"[DEBUG] Resumed chat with {len(history)} messages in history")
 
@@ -238,28 +238,28 @@ async def list_files_message(display_in_side_view=False):
     else:
         file_list_md = "**Your Knowledge Base:**\n\n"
         actions = []
-        for f in files: 
+        for f in files:
             file_list_md += f"- **{f['filename']}** ({f['type']}) - {f.get('size_bytes', 0)//1024} KB\n"
             actions.append(
                 cl.Action(name="delete_file", payload={"value": str(f['id'])}, label=f"🗑️ Delete {f['filename'][:15]}...")
             )
-        
+
         if display_in_side_view:
              element = cl.Text(name="知识库列表", content=file_list_md, display="side", language="markdown")
-             await cl.Message(content="✅ 列表已生成！\n请点击下方的 **“知识库列表”** 按钮/图标，在右侧侧边栏查看详细内容 👉", elements=[element]).send()
+             await cl.Message(content='✅ 列表已生成！\n请点击下方的 **"知识库列表"** 按钮/图标，在右侧侧边栏查看详细内容 👉', elements=[element]).send()
              return None
-        
+
         # Limit actions for inline display to avoid clutter
         if len(actions) > 10:
             file_list_md += "\n*(Showing first 10 delete buttons)*"
             actions = actions[:10]
-            
+
         return cl.Message(content=file_list_md, actions=actions)
 
 @cl.on_message
 async def main(message: cl.Message):
     """Handle incoming messages (text and files)."""
-    
+
     # --- 1. Handle Commands ---
     if message.content.strip() == "/files":
         msg = await list_files_message(display_in_side_view=False)
@@ -271,25 +271,113 @@ async def main(message: cl.Message):
         await list_files_message(display_in_side_view=True)
         return
 
+    # --- 1.5 Handle Knowledge Base Meta-Queries ---
+    # 检测用户询问知识库内容的意图，强制检索数据库
+    query_lower = message.content.strip().lower()
+    kb_keywords = [
+        "知识库", "knowledge base", "数据库", "database",
+        "存了啥", "有什么", "有啥", "都有什么",
+        "有哪些文件", "有哪些文档", "上传了什么",
+        "what do i have", "what's in", "what is in",
+        "show me my files", "list my files", "what files"
+    ]
+    if any(keyword in query_lower for keyword in kb_keywords):
+        # 不再直接返回，而是调用 ask_brain 并强制检索
+        # 这样 LLM 会先搜索数据库，然后基于检索结果回答
+        history = cl.user_session.get("history", [])
+        session_id = cl.context.session.id
+
+        # 获取文件数量用于 prompt 优化
+        files = get_all_files()
+        entries_count = 0
+        conn = get_db_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) as count FROM entries")
+            row = cursor.fetchone()
+            if row:
+                entries_count = row["count"]
+        finally:
+            conn.close()
+
+        if not files and entries_count == 0:
+            # 知识库为空时直接返回
+            await cl.Message(content="📭 **知识库是空的**\n\n还没有存储任何文件或笔记。你可以：\n- 上传文件（PDF、Word、图片等）\n- 直接发送文字让我保存").send()
+            return
+
+        # 调用 ask_brain 并强制检索
+        enhanced_query = f"{message.content.strip()}\n\n[系统提示] 用户正在询问知识库内容。请先检索数据库，然后基于检索结果回答。当前知识库包含 {len(files)} 个文件和 {entries_count} 条笔记。"
+
+        response_stream, sources = await cl.make_async(ask_brain)(
+            enhanced_query,
+            history=history,
+            stream=True,
+            conversation_id=session_id,
+            force_retrieve=True
+        )
+
+        full_response = ""
+
+        if isinstance(response_stream, str):
+            full_response = f"Error: {response_stream}"
+            msg = cl.Message(content=full_response)
+            await msg.send()
+        else:
+            msg = cl.Message(content="")
+            await msg.send()
+
+            for chunk in response_stream:
+                if chunk.choices and chunk.choices[0].delta.content:
+                    token = chunk.choices[0].delta.content
+                    full_response += token
+                    await msg.stream_token(token)
+
+            # Append sources if available
+            if sources:
+                async with cl.Step(name="📚 References") as source_step:
+                    lines = []
+                    for i, src in enumerate(sources, 1):
+                        filename = src.get("filename") or "Unknown"
+                        score = src.get("score", 0)
+                        ref_type = src.get("ref_type")
+                        ref_id = src.get("ref_id")
+                        if ref_type and ref_id:
+                            lines.append(f"{i}. [{filename}](/ref/{ref_type}/{ref_id}) (Score: {score:.4f})")
+                        else:
+                            lines.append(f"{i}. {filename} (Score: {score:.4f})")
+
+                    source_step.output = "\n".join(lines)
+
+            await msg.update()
+
+            # Update history
+            history.append({"role": "user", "content": message.content})
+            history.append({"role": "assistant", "content": full_response})
+            if len(history) > 20:
+                history = history[-20:]
+            cl.user_session.set("history", history)
+
+        return
+
     # --- 2. Handle File Uploads & Context ---
     uploaded_file_paths = []
-    
+
     if message.elements:
-        # Create a persistent temp directory for this session/message 
+        # Create a persistent temp directory for this session/message
         # (Note: In production, you might want better cleanup policies)
         temp_dir = os.path.join(tempfile.gettempdir(), "personal_brain_uploads")
         os.makedirs(temp_dir, exist_ok=True)
-        
+
         for element in message.elements:
             if hasattr(element, "path"):
                 original_name = element.name
                 # Use a unique prefix to avoid collisions
                 safe_name = f"{cl.user_session.get('id')}_{original_name}"
                 dest_path = os.path.join(temp_dir, safe_name)
-                
+
                 shutil.copy2(element.path, dest_path)
                 uploaded_file_paths.append(dest_path)
-                
+
         if uploaded_file_paths:
              await cl.Message(content=f"📎 Received {len(uploaded_file_paths)} files. I can analyze them or save them to memory.").send()
 
@@ -299,10 +387,10 @@ async def main(message: cl.Message):
 
         # Get chat history
         history = cl.user_session.get("history", [])
-        
+
         # Construct query with file context if needed
         query_text = message.content or "Please analyze the uploaded files."
-        
+
         # Add file paths to the system context or message
         # We append a hidden system-like instruction to the user message for the Agent to see
         if uploaded_file_paths:
@@ -316,14 +404,14 @@ async def main(message: cl.Message):
             # ask_brain returns (response_stream, sources)
             session_id = cl.context.session.id
             response_stream, sources = await cl.make_async(ask_brain)(
-                full_query_for_agent, 
-                history=history, 
+                full_query_for_agent,
+                history=history,
                 stream=True,
                 conversation_id=session_id
             )
-            
+
             full_response = ""
-            
+
             if isinstance(response_stream, str):
                 # Error message returned as string
                 full_response = f"Error: {response_stream}"
@@ -339,7 +427,7 @@ async def main(message: cl.Message):
                         token = chunk.choices[0].delta.content
                         full_response += token
                         await msg.stream_token(token)
-                
+
                 # Append sources if available
                 if sources:
                     # Create a separate step for references to make it collapsible
@@ -355,26 +443,26 @@ async def main(message: cl.Message):
                                 lines.append(f"{i}. [{filename}](/ref/{ref_type}/{ref_id}) (Score: {score:.4f})")
                             else:
                                 lines.append(f"{i}. {filename} (Score: {score:.4f})")
-                        
+
                         # Set the step output to the markdown list directly to ensure it is inside the collapsible area
                         source_step.output = "\n".join(lines)
-                        
+
                         # Remove the child message to avoid content appearing outside the step
                         # links_md = "\n".join(lines)
                         # links_msg = cl.Message(content=links_md)
                         # links_msg.parent_id = source_step.id
                         # await links_msg.send()
-                
+
                 # Update history (keep last 10 turns)
-                
+
                 await msg.update()
-                
+
                 # Update history (keep last 10 turns)
                 history.append({"role": "user", "content": message.content})
                 history.append({"role": "assistant", "content": full_response})
                 if len(history) > 20:
                     history = history[-20:]
                 cl.user_session.set("history", history)
-                
+
         except Exception as e:
             await cl.Message(content=f"Error processing query: {str(e)}").send()
