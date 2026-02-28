@@ -3,6 +3,7 @@ import os
 import time
 import json
 import pandas as pd
+import re
 from pathlib import Path
 from personal_brain.core.database import (
     init_db,
@@ -924,10 +925,32 @@ elif menu == "Knowledge Base":
                     chunks = get_file_chunks(file_id)
                     
                     if chunks:
-                        st.info(f"Found {len(chunks)} chunks.")
+                        col_info, col_export = st.columns([3, 1])
+                        with col_info:
+                            st.info(f"Found {len(chunks)} chunks.")
+                        with col_export:
+                            full_content = "\n\n--- CHUNK SEPARATOR ---\n\n".join([c['content'] for c in chunks])
+                            clean_filename_all = re.sub(r'[\\/*?:"<>|]', "", file_info['filename'])
+                            st.download_button(
+                                label="📦 Export All Chunks",
+                                data=full_content,
+                                file_name=f"{clean_filename_all}_all_chunks.txt",
+                                mime="text/plain",
+                                key=f"dl_all_{file_id}",
+                                help="Download all chunks merged into a single file"
+                            )
+
                         for chunk in chunks:
                             with st.expander(f"Chunk {chunk['chunk_index']} (ID: {chunk['id']})"):
                                 st.text(chunk['content'])
+                                clean_filename = re.sub(r'[\\/*?:"<>|]', "", file_info['filename'])
+                                st.download_button(
+                                    label="📥 Export to File",
+                                    data=chunk['content'],
+                                    file_name=f"{clean_filename}_chunk_{chunk['chunk_index']}.txt",
+                                    mime="text/plain",
+                                    key=f"dl_{chunk['id']}"
+                                )
                     else:
                         st.warning("No chunks found for this file.")
                     

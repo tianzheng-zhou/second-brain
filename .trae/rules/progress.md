@@ -19,6 +19,8 @@
 | 2026-02-25 | **UI** | **References 点击打开内容** | 由于部分区域不支持可点击超链接，改为在回答消息下方渲染引用按钮（Actions）；点击按钮通过回调查询数据库，并在侧边栏展示对应 entry/file/chunk 内容（必要时截断预览）。 |
 | 2026-02-25 | **UI** | **References 内置引用按钮** | 引用按钮调整为显示在 `📚 References` 折叠区内部（作为其子消息），避免占用主回答区域；点击按钮仍可在侧边栏打开引用内容。 |
 | 2026-02-26 | **UI** | **References 折叠区内可点击链接** | 在 `📚 References` 折叠区内部渲染一条子消息，包含 Markdown 链接列表（指向 `/ref/{type}/{id}`）。不再在主对话区生成额外气泡，点击在新标签页打开内容。 |
+| 2026-03-01 | **UI** | **Chunk 导出功能** | 1. **Chainlit**: 在知识库内容预览页 (`/ref/...`) 增加 "Export to File" 按钮。<br>2. **Admin Console**: 在知识库 Chunk Viewer 中增加 "📥 Export to File" (单个) 和 "📦 Export All Chunks" (批量) 按钮。 |
+| 2026-03-01 | **Ingestion** | **优化语义切分** | 1. 废弃基于关键词的切分合并策略。<br>2. 引入 LLM (`_refine_structure_with_llm`) 对 Markdown 标题结构进行语义分析，智能识别并合并从属章节（如 "Notes"、"Warnings"）。 |
 
 ## 待办事项 (Backlog)
 - [ ] **Web 搜索能力**: 集成联网搜索工具 (如 Serper/Google Search) 以补充外部知识。

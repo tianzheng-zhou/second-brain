@@ -5,6 +5,7 @@ import tempfile
 from pathlib import Path
 import sys
 import html
+import re
 
 # Add project root to sys.path to ensure imports work correctly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -67,7 +68,44 @@ try:
 
             safe_title = html.escape(title)
             safe_content = html.escape(content)
-            return HTMLResponse(f"<h2>{safe_title}</h2><pre style='white-space: pre-wrap'>{safe_content}</pre>")
+            clean_title = re.sub(r'[\\/*?:"<>|]', "", title)
+            
+            html_content = f"""
+            <html>
+            <head>
+                <title>{safe_title}</title>
+                <style>
+                    body {{ font-family: sans-serif; padding: 20px; max-width: 800px; margin: 0 auto; }}
+                    .header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }}
+                    button {{ padding: 8px 16px; background-color: #0F172A; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; }}
+                    button:hover {{ background-color: #1E293B; }}
+                    pre {{ white-space: pre-wrap; background-color: #f1f5f9; padding: 15px; border-radius: 8px; overflow-x: auto; }}
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h2>{safe_title}</h2>
+                    <button onclick="downloadContent()">📥 Export to File</button>
+                </div>
+                <pre id="content">{safe_content}</pre>
+                <script>
+                    function downloadContent() {{
+                        const content = document.getElementById('content').textContent;
+                        const blob = new Blob([content], {{ type: 'text/plain' }});
+                        const url = window.URL.createObjectURL(blob);
+                        const a = document.createElement('a');
+                        a.href = url;
+                        a.download = "{clean_title}.txt";
+                        document.body.appendChild(a);
+                        a.click();
+                        window.URL.revokeObjectURL(url);
+                        document.body.removeChild(a);
+                    }}
+                </script>
+            </body>
+            </html>
+            """
+            return HTMLResponse(html_content)
         finally:
             conn.close()
 

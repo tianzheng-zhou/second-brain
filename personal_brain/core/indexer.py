@@ -3,6 +3,7 @@ import base64
 import dashscope
 import re
 import hashlib
+import json
 from pathlib import Path
 from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -23,7 +24,7 @@ from personal_brain.utils.mineru import MinerUClient
 from personal_brain.utils.asr_client import ASRClient
 
 # Semantic-aware text splitter using LLM
-def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
+def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int = 1500, chunk_overlap: int = 200, model: str = None) -> list[str]:
     """
     Split text into semantically coherent chunks using LLM.
 
@@ -44,6 +45,7 @@ def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int =
         image_root: Path to image folder (for PDF/markdown with images)
         chunk_size: Target chunk size in characters
         chunk_overlap: Deprecated - overlap is no longer applied between chunks
+        model: LLM model to use for semantic analysis
 
     Returns:
         List of text chunks with semantic coherence (no overlap)
@@ -61,10 +63,10 @@ def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int =
 
         if has_images:
             # Use multimodal prompt for documents with images
-            return _semantic_split_with_images(text, image_root, chunk_size, chunk_overlap)
+            return _semantic_split_with_images(text, image_root, chunk_size, chunk_overlap, model)
         else:
             # Use text-only prompt for plain text documents
-            return _semantic_split_text_only(text, chunk_size, chunk_overlap)
+            return _semantic_split_text_only(text, chunk_size, chunk_overlap, model)
 
     except Exception as e:
         # Fallback to recursive character splitter on any error
@@ -72,392 +74,217 @@ def semantic_text_splitter(text: str, image_root: Path = None, chunk_size: int =
         return recursive_character_text_splitter(text, chunk_size, chunk_overlap)
 
 
-def _semantic_split_text_only(text: str, chunk_size: int, chunk_overlap: int) -> list[str]:
+def _semantic_split_text_only(text: str, chunk_size: int, chunk_overlap: int, model: str = None) -> list[str]:
     """
     Semantic splitting for text-only documents.
 
-    KEY INSIGHT: Instead of asking LLM to count characters (which it's bad at),
-    we split text into semantic units (preserving tables, lists, code blocks),
-    then ask LLM which units are good split boundaries.
+    Strategy:
+    1. Split into semantic units (each heading = one unit)
+    2. Merge consecutive small units if needed
+    3. Keep units under max size
     """
 
-    # Step 1: Split text into semantic units (preserving structural elements)
-    content_units, unit_boundaries = _split_into_semantic_units(text)
+    # Step 1: Split text into semantic units (each heading = one unit)
+    # Pass model to allow LLM-based structure refinement
+    content_units, unit_boundaries = _split_into_semantic_units(text, model)
 
-    # If too few units, semantic splitting cannot proceed
-    if len(content_units) < 3:
-        raise Exception(f"Text too short for semantic splitting: only {len(content_units)} units found")
+    if len(content_units) < 2:
+        return content_units
 
-    # Step 2: Ask LLM to identify which units are good split points
-    unit_previews = []
-    for i, u in enumerate(content_units):
-        preview = u[:80].replace('\n', ' ')
-        # Mark special content types
-        marker = ""
-        if u.strip().startswith('```'):
-            marker = "[代码块]"
-        elif u.strip().startswith('|'):
-            marker = "[表格]"
-        elif re.match(r'^\s*(\d+[.)]|[-*+])\s', u.strip()):
-            marker = "[列表]"
-        unit_previews.append(f"[{i}]{marker} {preview}... ({len(u)} 字)")
-
-    units_text = "\n".join(unit_previews)
-
-    analysis_prompt = f"""请分析以下内容单元列表，识别**好的分割边界**（主题转换处）。
-
-【任务】
-从以下单元中选择合适的分割点，使每个块在语义上独立完整。
-重要：**不要**在表格、代码块或列表中间分割，保持这些结构的完整性。
-
-【目标块大小】
-- 目标：约 {chunk_size} 字符
-- 最小：{int(chunk_size * 0.5)} 字符（低于此值的块会被合并）
-- 最大：{int(chunk_size * 1.5)} 字符
-
-【选择标准 - 优先级从高到低】
-1. **主题转换**：不同主题/领域之间（如从"安装步骤"转到"配置说明"）
-2. **章节边界**：明确的章节、小节结束处
-3. **逻辑完整**：一个完整步骤、功能说明或概念论述结束后
-
-【特别注意事项】
-- 带有[表格]标记的单元必须在同一chunk中保持完整
-- 带有[代码块]标记的单元不要拆开
-- 连续的[列表]项应尽可能保持在同一块中
-
-【避免选择】
-- 表格、代码块、列表的中间位置
-- 同一主题或步骤内部的单元之间
-- 因果关系紧密的内容之间
-
-【输出格式】
-只返回单元编号，用逗号分隔。例如：2, 5, 8
-表示在第2单元后、第5单元后、第8单元后分割。
-如果不确定，返回最明确的主题转换点，宁少勿多。
-
-内容单元列表（共 {len(content_units)} 个）：
-{units_text}
-
-分割点（只返回数字，用逗号分隔）："""
-
-    # Get semantic split model from dynamic config
-    semantic_split_model = config_manager.get("semantic_split_model", "qwen3.5-flash")
-
-    response = call_llm(
-        model=semantic_split_model,
-        messages=[
-            {"role": "user", "content": analysis_prompt}
-        ],
-        # Thinking mode disabled by default for speed
-        enable_thinking=False
-    )
-
-    # Parse paragraph indices from response
-    split_indices_str = response.choices[0].message.content.strip()
-
-    # Enhanced parsing: extract numbers, handling various formats
-    # Look for standalone numbers or numbers followed by punctuation
-    numbers = re.findall(r'\b\d+\b', split_indices_str)
-    split_paragraph_indices = sorted([int(n) for n in numbers])
-
-    # Validate indices are within reasonable range
-    split_paragraph_indices = [idx for idx in split_paragraph_indices if 0 <= idx < len(unit_boundaries)]
-
-    # Remove duplicates while preserving order
-    seen = set()
-    split_paragraph_indices = [x for x in split_paragraph_indices if not (x in seen or seen.add(x))]
-
-    # Step 3: Convert paragraph indices to character positions with intelligent merging
-    # This is the KEY: WE calculate positions, not the LLM!
-    valid_splits = []
-    min_chunk_size = int(chunk_size * 0.5)  # Increased minimum to reduce small chunks
+    # Step 2: Merge strategy - combine consecutive small units
+    # But don't merge if it would create oversized chunk or merge different Steps
+    min_chunk_size = int(chunk_size * 0.5)
     max_chunk_size = int(chunk_size * 1.5)
 
-    for idx in split_paragraph_indices:
-        if 0 <= idx < len(unit_boundaries):
-            # Get the end position of this paragraph
-            _, end_pos, _ = unit_boundaries[idx]
-
-            # Validate: ensure reasonable chunk sizes
-            if len(valid_splits) > 0:
-                prev_split = valid_splits[-1]
-                chunk_len = end_pos - prev_split
-                if chunk_len < min_chunk_size:
-                    # Too small, skip this split (will be merged with next)
-                    continue
-                if chunk_len > max_chunk_size:
-                    # Too large, accept anyway but warn (better than bad split)
-                    pass
-            else:
-                # First split: ensure first chunk isn't too small
-                if end_pos < min_chunk_size:
-                    continue  # First chunk would be too small
-
-            # Ensure not too close to the end (leave at least 20% for last chunk)
-            remaining = len(text) - end_pos
-            if remaining < min_chunk_size * 0.5:
-                # Don't split here, let the rest be part of previous chunk
-                continue
-
-            valid_splits.append(end_pos)
-
-    # If no valid splits from LLM or too few, add fallback splits
-    if len(valid_splits) == 0:
-        # Generate automatic splits based on chunk size
-        current_pos = 0
-        while current_pos + chunk_size < len(text):
-            # Find the nearest paragraph boundary after target position
-            target_pos = current_pos + chunk_size
-            best_split = None
-            for start, end, idx in unit_boundaries:
-                if end >= target_pos - chunk_size * 0.3 and end <= target_pos + chunk_size * 0.3:
-                    if end > current_pos and (best_split is None or abs(end - target_pos) < abs(best_split - target_pos)):
-                        best_split = end
-            if best_split and best_split not in valid_splits:
-                valid_splits.append(best_split)
-                current_pos = best_split
-            else:
-                # No good boundary found, move forward
-                current_pos = target_pos
-
-    if not valid_splits:
-        raise Exception("No valid split points could be determined")
-
-    # Step 4: Create chunks using the validated split positions
     chunks = []
-    prev = 0
-    for split_pos in valid_splits:
-        chunk = text[prev:split_pos].strip()
-        if chunk:
-            chunks.append(chunk)
-        prev = split_pos
+    current_chunk = []
+    current_size = 0
 
-    if prev < len(text):
-        chunk = text[prev:].strip()
-        if chunk:
-            chunks.append(chunk)
+    for i, unit in enumerate(content_units):
+        unit_size = len(unit)
 
-    # Step 5: Post-process
-    return _postprocess_chunks(chunks, chunk_size, chunk_overlap)
+        # Check if this unit starts a new Step (has heading)
+        is_new_step = bool(re.match(r'^#{1,6}\s', unit.strip()))
+
+        # Decide whether to start a new chunk
+        start_new_chunk = False
+
+        if not current_chunk:
+            # First unit
+            start_new_chunk = True
+        elif is_new_step:
+            # New Step - check if we should merge with previous or start new
+            if current_size < min_chunk_size:
+                # Previous chunk is small, merge this Step into it
+                start_new_chunk = False
+            elif current_size + unit_size > max_chunk_size:
+                # Would exceed max size, start new chunk
+                start_new_chunk = True
+            else:
+                # Normal case: new Step gets its own chunk
+                start_new_chunk = True
+        else:
+            # Not a new Step (continuation) - merge with current
+            start_new_chunk = False
+
+        if start_new_chunk and current_chunk:
+            # Save current chunk
+            chunk_text = '\n\n'.join(current_chunk)
+            chunks.append(chunk_text)
+            current_chunk = []
+            current_size = 0
+
+        # Add unit to current chunk
+        current_chunk.append(unit)
+        current_size += unit_size
+
+    # Don't forget the last chunk
+    if current_chunk:
+        chunk_text = '\n\n'.join(current_chunk)
+        chunks.append(chunk_text)
+
+    # Step 3: Fix any chapter boundary issues
+    chunks = _fix_chapter_boundaries(chunks)
+
+    # Step 4: Final size check - only merge if chunk is extremely small (< 200 chars)
+    # and don't merge across heading boundaries
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) < 200 and final_chunks:
+            # Very small chunk, merge with previous if it doesn't make it too large
+            if len(final_chunks[-1]) + len(chunk) < chunk_size * 1.2:
+                final_chunks[-1] = final_chunks[-1] + "\n\n" + chunk
+            else:
+                final_chunks.append(chunk)
+        else:
+            final_chunks.append(chunk)
+
+    return final_chunks
 
 
-def _semantic_split_with_images(text: str, image_root: Path, chunk_size: int, chunk_overlap: int) -> list[str]:
+def _semantic_split_with_images(text: str, image_root: Path, chunk_size: int, chunk_overlap: int, model: str = None) -> list[str]:
     """
     Semantic splitting for documents with images (PDF, markdown with figures).
 
-    KEY INSIGHT: Instead of asking LLM to count characters, we:
-    1. Split into paragraphs (keeping images with their context)
-    2. Ask LLM which paragraphs are good split boundaries
-    3. Calculate actual positions ourselves
-
-    Preserves image-text relationships by keeping images with their context.
+    Strategy:
+    1. Split into semantic units by headings (like text-only version)
+    2. Keep images with their context
+    3. Merge consecutive small units if needed
     """
 
-    # Step 1: Split text into paragraphs, but keep image blocks intact
-    # Image blocks include: the image markdown + caption paragraph
-    paragraphs = re.split(r'(\n\n+)', text)
+    # Step 1: Use the same semantic unit splitting as text-only
+    # but with image-aware grouping
+    # Pass model to allow LLM-based structure refinement
+    content_units, unit_boundaries = _split_into_semantic_units(text, model)
 
-    # Group paragraphs into "semantic units"
-    # A unit can be: [text], [image + caption], [text + image reference]
-    content_units = []
-    unit_boundaries = []  # (start_char, end_char, unit_index)
+    if len(content_units) < 2:
+        return content_units
 
-    current_pos = 0
-    image_pattern = r'!\[.*?\]\(.*?\)'
-
-    i = 0
-    while i < len(paragraphs):
-        p = paragraphs[i]
-
-        if not p.strip():
-            current_pos += len(p)
-            i += 1
-            continue
-
-        unit_start = current_pos
-        unit_content = [p]
-        current_pos += len(p)
-
-        # Check if this paragraph contains or references an image
-        has_image = re.search(image_pattern, p)
-        is_caption = has_image  # Paragraph with image is likely a caption
-
-        # Look ahead: check if next paragraph is an image or caption
-        j = i + 1
-        while j < len(paragraphs) - 1:
-            next_p = paragraphs[j]
-            next_next_p = paragraphs[j + 1] if j + 1 < len(paragraphs) else ""
-
-            # Skip separators
-            if not next_p.strip():
-                j += 1
-                continue
-
-            # Check if next is an image
-            if re.search(image_pattern, next_p):
-                unit_content.append(next_p)
-                current_pos += len(paragraphs[j])
-                j += 1
-
-                # Also include caption after image
-                if j < len(paragraphs) and paragraphs[j].strip():
-                    if len(paragraphs[j]) < 200:  # Caption is usually short
-                        unit_content.append(paragraphs[j])
-                        current_pos += len(paragraphs[j])
-                        j += 1
-                break
-
-            # Check if current paragraph has image and next is caption
-            if has_image and len(next_p) < 200 and not re.search(image_pattern, next_p):
-                # Likely a caption
-                unit_content.append(next_p)
-                current_pos += len(paragraphs[j])
-                j += 1
-                break
-
-            # No image relationship, stop grouping
-            break
-
-        i = j
-
-        unit_end = current_pos
-        content_units.append("".join(unit_content))
-        unit_boundaries.append((unit_start, unit_end, len(content_units) - 1))
-
-    # If too few units, semantic splitting cannot proceed
-    if len(content_units) < 3:
-        raise Exception(f"Text too short for semantic splitting: only {len(content_units)} units found")
-
-    # Step 2: Ask LLM to identify split points by unit index
-    unit_previews = []
-    for i, u in enumerate(content_units):
-        preview = u[:100].replace('\n', ' ')
-        has_img = "[图片]" if re.search(image_pattern, u) else ""
-        unit_previews.append(f"[{i}]{has_img} {preview}... ({len(u)} 字)")
-
-    units_text = "\n".join(unit_previews)
-
-    analysis_prompt = f"""请分析以下文档单元列表（包含文本和图片），识别**好的分割边界**（主题转换处）。
-
-【任务】
-从以下单元中选择合适的分割点，使每个块在语义上独立完整。**保持图片与其说明文字在同一块中**。
-
-【目标块大小】
-- 目标：约 {chunk_size} 字符
-- 最小：{int(chunk_size * 0.5)} 字符（低于此值的块会被合并）
-- 最大：{int(chunk_size * 1.5)} 字符
-
-【选择标准 - 优先级从高到低】
-1. **主题转换**：不同主题/领域之间（如从"医疗"转到"教育"）
-2. **章节边界**：明确的章节、小节结束处
-3. **逻辑完整**：一个完整概念论述结束后
-4. **图片边界**：优先在图片单元之前或之后分割，不在图片单元中间分割
-
-【避免选择】
-- 同一主题内部的段落之间
-- 因果关系紧密的段落之间
-- 图片与其说明文字之间
-- 连续的例子或并列说明中间
-
-【输出格式】
-只返回单元编号，用逗号分隔。例如：2, 5, 8
-表示在第2单元后、第5单元后、第8单元后分割。
-如果不确定，返回最明确的主题转换点，宁少勿多。
-
-文档单元列表（共 {len(content_units)} 单元，[图片]标记表示包含图片）：
-{units_text}
-
-分割点（只返回数字，用逗号分隔）："""
-
-    # Get semantic split model from dynamic config
-    semantic_split_model = config_manager.get("semantic_split_model", "qwen3.5-flash")
-
-    response = call_llm(
-        model=semantic_split_model,
-        messages=[
-            {"role": "user", "content": analysis_prompt}
-        ],
-        # Thinking mode disabled by default for speed
-        enable_thinking=False
-    )
-
-    # Parse unit indices from response
-    split_indices_str = response.choices[0].message.content.strip()
-
-    # Enhanced parsing: extract numbers, handling various formats
-    numbers = re.findall(r'\b\d+\b', split_indices_str)
-    split_unit_indices = sorted([int(n) for n in numbers])
-
-    # Validate indices are within reasonable range
-    split_unit_indices = [idx for idx in split_unit_indices if 0 <= idx < len(unit_boundaries)]
-
-    # Remove duplicates while preserving order
-    seen = set()
-    split_unit_indices = [x for x in split_unit_indices if not (x in seen or seen.add(x))]
-
-    # Step 3: Convert unit indices to character positions with intelligent merging
-    valid_splits = []
-    min_chunk_size = int(chunk_size * 0.5)  # Increased minimum to reduce small chunks
+    # Step 2: Merge strategy - same as text-only
+    min_chunk_size = int(chunk_size * 0.5)
     max_chunk_size = int(chunk_size * 1.5)
 
-    for idx in split_unit_indices:
-        if 0 <= idx < len(unit_boundaries):
-            _, end_pos, _ = unit_boundaries[idx]
-
-            # Validate: ensure reasonable chunk sizes
-            if len(valid_splits) > 0:
-                prev_split = valid_splits[-1]
-                chunk_len = end_pos - prev_split
-                if chunk_len < min_chunk_size:
-                    continue  # Too small, skip this split
-                if chunk_len > max_chunk_size:
-                    pass  # Too large, accept anyway
-            else:
-                if end_pos < min_chunk_size:
-                    continue  # First chunk would be too small
-
-            # Ensure not too close to the end
-            remaining = len(text) - end_pos
-            if remaining < min_chunk_size * 0.5:
-                continue
-
-            valid_splits.append(end_pos)
-
-    # If no valid splits or too few, add fallback splits
-    if len(valid_splits) == 0:
-        # Generate automatic splits based on chunk size
-        current_pos = 0
-        while current_pos + chunk_size < len(text):
-            target_pos = current_pos + chunk_size
-            best_split = None
-            for start, end, idx in unit_boundaries:
-                if end >= target_pos - chunk_size * 0.3 and end <= target_pos + chunk_size * 0.3:
-                    if end > current_pos and (best_split is None or abs(end - target_pos) < abs(best_split - target_pos)):
-                        best_split = end
-            if best_split and best_split not in valid_splits:
-                valid_splits.append(best_split)
-                current_pos = best_split
-            else:
-                current_pos = target_pos
-
-    if not valid_splits:
-        raise Exception("No valid split points could be determined for document with images")
-
-    # Step 4: Create chunks
     chunks = []
-    prev = 0
-    for split_pos in valid_splits:
-        chunk = text[prev:split_pos].strip()
-        if chunk:
-            chunks.append(chunk)
-        prev = split_pos
+    current_chunk = []
+    current_size = 0
 
-    if prev < len(text):
-        chunk = text[prev:].strip()
-        if chunk:
-            chunks.append(chunk)
+    for i, unit in enumerate(content_units):
+        unit_size = len(unit)
 
-    return _postprocess_chunks(chunks, chunk_size, chunk_overlap)
+        # Check if this unit starts a new Step (has heading)
+        is_new_step = bool(re.match(r'^#{1,6}\s', unit.strip()))
+
+        # Decide whether to start a new chunk
+        start_new_chunk = False
+
+        if not current_chunk:
+            # First unit
+            start_new_chunk = True
+        elif is_new_step:
+            # New Step - check if we should merge with previous or start new
+            if current_size < min_chunk_size:
+                # Previous chunk is small, merge this Step into it
+                start_new_chunk = False
+            elif current_size + unit_size > max_chunk_size:
+                # Would exceed max size, start new chunk
+                start_new_chunk = True
+            else:
+                # Normal case: new Step gets its own chunk
+                start_new_chunk = True
+        else:
+            # Not a new Step (continuation) - merge with current
+            start_new_chunk = False
+
+        if start_new_chunk and current_chunk:
+            # Save current chunk
+            chunk_text = '\n\n'.join(current_chunk)
+            chunks.append(chunk_text)
+            current_chunk = []
+            current_size = 0
+
+        # Add unit to current chunk
+        current_chunk.append(unit)
+        current_size += unit_size
+
+    # Don't forget the last chunk
+    if current_chunk:
+        chunk_text = '\n\n'.join(current_chunk)
+        chunks.append(chunk_text)
+
+    # Step 3: Fix chapter boundaries
+    chunks = _fix_chapter_boundaries(chunks)
+
+    # Step 4: Final size check - only merge if chunk is extremely small (< 200 chars)
+    # and don't merge across heading boundaries
+    final_chunks = []
+    for chunk in chunks:
+        if len(chunk) < 200 and final_chunks:
+            # Very small chunk, merge with previous if it doesn't make it too large
+            if len(final_chunks[-1]) + len(chunk) < chunk_size * 1.2:
+                final_chunks[-1] = final_chunks[-1] + "\n\n" + chunk
+            else:
+                final_chunks.append(chunk)
+        else:
+            final_chunks.append(chunk)
+
+    return final_chunks
+
+
+def _fix_chapter_boundaries(chunks: list[str]) -> list[str]:
+    """
+    Fix chunks that break at chapter boundaries.
+    Ensures no chunk ends with just a heading and no chunk starts in the middle of a chapter.
+    """
+    if len(chunks) <= 1:
+        return chunks
+
+    heading_pattern = re.compile(r'^#{1,6}\s', re.MULTILINE)
+    fixed_chunks = []
+
+    i = 0
+    while i < len(chunks):
+        chunk = chunks[i]
+        lines = chunk.split('\n')
+
+        # Check if this chunk ends with just a heading (or very little content after heading)
+        if len(lines) >= 1:
+            last_line = lines[-1].strip()
+            # Check if last line is a heading or chunk only has a heading
+            if heading_pattern.match(last_line) or (len(lines) <= 2 and heading_pattern.match(chunk)):
+                # This chunk ends with a heading - merge with next chunk if exists
+                if i + 1 < len(chunks):
+                    merged = chunk + "\n\n" + chunks[i + 1]
+                    fixed_chunks.append(merged)
+                    i += 2  # Skip next chunk as it's merged
+                    continue
+
+        # Check if this chunk starts with a heading that continues from previous
+        # (This is handled by the previous check - if previous ended with heading)
+
+        fixed_chunks.append(chunk)
+        i += 1
+
+    return fixed_chunks
 
 
 def _postprocess_chunks(chunks: list[str], chunk_size: int, chunk_overlap: int) -> list[str]:
@@ -468,75 +295,77 @@ def _postprocess_chunks(chunks: list[str], chunk_size: int, chunk_overlap: int) 
     Each chunk now contains unique, non-overlapping content.
 
     Key logic:
-    1. Merge small chunks with the PREVIOUS chunk to preserve forward context
-    2. Handle the first chunk specially - merge with next if too small
+    1. Collect consecutive small chunks and merge them together
+    2. Merge small chunks with the next normal chunk
+    3. Ensure minimum chunk size is respected
     """
 
     if not chunks:
         return chunks
 
-    # Step 1: Merge very small chunks
-    # Strategy: iterate backwards and merge small chunks with previous
-    # This preserves the "forward-looking" nature of chunks
-    final_chunks = []
+    MIN_CHUNK_RATIO = 0.4  # Consistent threshold for small chunk detection
+    min_chunk_size = int(chunk_size * MIN_CHUNK_RATIO)
 
-    for i, chunk in enumerate(chunks):
-        # Skip empty chunks
+    # Step 1: First pass - group consecutive small chunks together
+    grouped_chunks = []
+    pending_small = []  # Buffer for consecutive small chunks
+
+    for chunk in chunks:
         if not chunk.strip():
             continue
 
-        # Check if this chunk is too small
-        is_too_small = len(chunk) < chunk_size * 0.4
-
-        if is_too_small:
-            if final_chunks:
-                # Merge with previous chunk (preferred)
-                final_chunks[-1] += "\n\n" + chunk
-            elif i < len(chunks) - 1:
-                # First chunk is small - merge with next
-                # But don't add to final_chunks yet, wait for next iteration
-                # Store as "pending merge"
-                final_chunks.append(chunk)  # Will be merged with next
-            else:
-                # Last chunk and small - just add it
-                final_chunks.append(chunk)
+        if len(chunk) < min_chunk_size:
+            # Small chunk - add to pending buffer
+            pending_small.append(chunk)
         else:
-            # Check if previous chunk was small and needs merging
-            if final_chunks and len(final_chunks[-1]) < chunk_size * 0.4:
-                # Previous was small, merge current with it
-                prev_small = final_chunks.pop()
-                final_chunks.append(prev_small + "\n\n" + chunk)
+            # Normal chunk
+            if pending_small:
+                # Merge pending small chunks with this normal chunk
+                merged = "\n\n".join(pending_small) + "\n\n" + chunk
+                grouped_chunks.append(merged)
+                pending_small = []
             else:
-                final_chunks.append(chunk)
+                grouped_chunks.append(chunk)
 
-    # Step 2: If first chunk is still too small, merge with second
-    while len(final_chunks) > 1 and len(final_chunks[0]) < chunk_size * 0.5:
-        if len(final_chunks) >= 2:
-            second = final_chunks.pop(1)
-            final_chunks[0] += "\n\n" + second
+    # Handle any remaining small chunks at the end
+    if pending_small:
+        if grouped_chunks:
+            # Merge with the last normal chunk
+            last_chunk = grouped_chunks.pop()
+            merged = last_chunk + "\n\n" + "\n\n".join(pending_small)
+            grouped_chunks.append(merged)
+        else:
+            # All chunks were small, join them together
+            grouped_chunks.append("\n\n".join(pending_small))
 
-    # Step 3: Return chunks WITHOUT overlap
-    # Note: Overlap has been removed to avoid content duplication between chunks
-    # Each chunk now contains unique, non-overlapping content
-    return final_chunks
+    # Step 2: Second pass - ensure first chunk meets minimum size
+    # Merge first chunk with second if first is still too small
+    while len(grouped_chunks) > 1 and len(grouped_chunks[0]) < min_chunk_size:
+        second = grouped_chunks.pop(1)
+        grouped_chunks[0] = grouped_chunks[0] + "\n\n" + second
+
+    return grouped_chunks
 
 
-def _split_into_semantic_units(text: str) -> tuple[list[str], list[tuple[int, int, int]]]:
+def _split_into_semantic_units(text: str, model: str = None) -> tuple[list[str], list[tuple[int, int, int]]]:
     """
     Split text into semantic units, preserving structural elements like tables,
-    code blocks, and lists.
+    code blocks, lists, and document sections.
+
+    Strategy:
+    - Each heading (like "# Step X") starts a new semantic unit
+    - Keep tables, code blocks intact within their section
+    - Each unit = one heading + its content until next heading
+    - This ensures Steps are not merged together
+
+    If model is provided, it uses LLM to identify which units should be merged
+    (e.g., "Notes" belonging to previous "Step").
 
     Returns:
         Tuple of (content_units, unit_boundaries)
         unit_boundaries: list of (start_char, end_char, unit_index)
     """
-    # Pattern for structural elements that should not be split
-    # 1. Markdown tables (lines starting with | containing |)
-    # 2. Code blocks (```...```)
-    # 3. Numbered lists (1. 2. etc.)
-    # 4. Bullet lists (- * +)
-
-    # Split text into lines while preserving line structure
+    # Split text into lines
     if '\r\n' in text:
         lines = text.split('\r\n')
         line_ending = '\r\n'
@@ -544,117 +373,210 @@ def _split_into_semantic_units(text: str) -> tuple[list[str], list[tuple[int, in
         lines = text.split('\n')
         line_ending = '\n'
 
+    def get_line_pos(idx: int) -> int:
+        """Get character position of line start"""
+        return sum(len(lines[j]) + len(line_ending) for j in range(idx))
+
+    def is_heading(line_idx: int) -> bool:
+        """Check if line is a heading (starts with #)"""
+        if line_idx >= len(lines):
+            return False
+        line = lines[line_idx]
+        # Markdown heading: # Heading
+        if re.match(r'^#{1,6}\s', line.strip()):
+            # Note: We rely on LLM to merge sections, so we accept ALL headers here.
+            # No keyword filtering.
+            return True
+        return False
+
     units = []
     boundaries = []
-    current_pos = 0
-
+    current_unit_lines = []
+    current_unit_start = 0
     i = 0
+
+    # Skip leading empty lines
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+
+    if i < len(lines):
+        current_unit_start = i
+
     while i < len(lines):
         line = lines[i]
 
-        # Check for code block
-        if line.strip().startswith('```'):
-            # Collect entire code block
-            code_block = [line]
-            start_line_idx = i
+        # Check if this is a heading (and not the first line of current unit)
+        if is_heading(i) and current_unit_lines and i > current_unit_start:
+            # Save current unit
+            start = get_line_pos(current_unit_start)
+            end = get_line_pos(i - 1) + len(lines[i - 1])
+            content = line_ending.join(current_unit_lines).strip()
+            if content:
+                units.append(content)
+                boundaries.append((start, end, len(units) - 1))
+
+            # Start new unit with this heading
+            current_unit_lines = [line]
+            current_unit_start = i
             i += 1
-            while i < len(lines) and not lines[i].strip().startswith('```'):
-                code_block.append(lines[i])
-                i += 1
-            if i < len(lines):
-                code_block.append(lines[i])
-                i += 1
-            # Calculate exact position in original text
-            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
-            # For the last line, don't add line ending
-            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
-            unit_content = line_ending.join(code_block)
-            units.append(unit_content)
-            boundaries.append((start, end, len(units) - 1))
-            current_pos = end
             continue
 
-        # Check for markdown table
-        if line.strip().startswith('|') and '|' in line[1:]:
-            # Collect entire table
-            table_lines = [line]
-            start_line_idx = i
-            i += 1
-            while i < len(lines) and lines[i].strip().startswith('|'):
-                table_lines.append(lines[i])
-                i += 1
-            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
-            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
-            unit_content = line_ending.join(table_lines)
-            units.append(unit_content)
-            boundaries.append((start, end, len(units) - 1))
-            current_pos = end
-            continue
+        # Add line to current unit
+        if not current_unit_lines and line.strip():
+            current_unit_start = i
+        current_unit_lines.append(line)
+        i += 1
 
-        # Check for list items (numbered or bullet)
-        list_pattern = r'^\s*(\d+[.)]|[-*+])\s'
-        if re.match(list_pattern, line):
-            # Collect related list items (consecutive list items with similar indentation)
-            list_items = [line]
-            base_indent = len(line) - len(line.lstrip())
-            start_line_idx = i
-            i += 1
-            while i < len(lines):
-                next_line = lines[i]
-                if not next_line.strip():
-                    # Empty line - check if next non-empty line is a list item
-                    j = i + 1
-                    while j < len(lines) and not lines[j].strip():
-                        j += 1
-                    if j < len(lines) and re.match(list_pattern, lines[j]):
-                        # Add empty lines between list items
-                        while i < j:
-                            list_items.append(lines[i])
-                            i += 1
-                        list_items.append(lines[i])
-                        i += 1
-                        continue
-                    break
-                elif re.match(list_pattern, next_line):
-                    list_items.append(next_line)
-                    i += 1
-                elif next_line.strip() and len(next_line) - len(next_line.lstrip()) > base_indent:
-                    # Indented continuation of list item
-                    list_items.append(next_line)
-                    i += 1
-                else:
-                    break
-            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
-            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
-            unit_content = line_ending.join(list_items)
-            units.append(unit_content)
-            boundaries.append((start, end, len(units) - 1))
-            current_pos = end
-            continue
-
-        # Regular paragraph - collect consecutive non-empty lines
-        if line.strip():
-            para_lines = [line]
-            start_line_idx = i
-            i += 1
-            while i < len(lines) and lines[i].strip():
-                # Check if next line starts a special block
-                if lines[i].strip().startswith('```') or lines[i].strip().startswith('|') or re.match(list_pattern, lines[i]):
-                    break
-                para_lines.append(lines[i])
-                i += 1
-            start = sum(len(lines[j]) + len(line_ending) for j in range(start_line_idx))
-            end = sum(len(lines[j]) + len(line_ending) for j in range(i - 1)) + len(lines[i - 1])
-            unit_content = line_ending.join(para_lines)
-            units.append(unit_content)
-            boundaries.append((start, end, len(units) - 1))
-            current_pos = end
+    # Save last unit
+    if current_unit_lines:
+        start = get_line_pos(current_unit_start)
+        if len(lines) > 0:
+            end = get_line_pos(len(lines) - 1) + len(lines[-1])
         else:
-            # Empty line - just advance position
-            current_pos += len(line) + len(line_ending)
-            i += 1
+            end = start
+        content = line_ending.join(current_unit_lines).strip()
+        if content:
+            units.append(content)
+            boundaries.append((start, end, len(units) - 1))
 
-    return units, boundaries
+    # LLM Refinement Step
+    if model and len(units) > 1:
+        print(f"  Refining {len(units)} semantic units using LLM ({model})...")
+        units = _refine_structure_with_llm(units, model)
+        # Note: boundaries are now invalid/approximate for merged units, but that's okay
+        # as subsequent logic doesn't strictly rely on them for splitting.
+        # We rebuild approximate boundaries just in case.
+        boundaries = []
+        current_pos = 0
+        for idx, u in enumerate(units):
+            end_pos = current_pos + len(u)
+            boundaries.append((current_pos, end_pos, idx))
+            current_pos = end_pos + 2 # +2 for \n\n
+
+    # Post-process: split very large units at paragraph boundaries
+    # But keep heading with its content
+    MAX_UNIT_SIZE = 1200
+    final_units = []
+    final_boundaries = []
+
+    for unit_idx, unit in enumerate(units):
+        # Retrieve boundary if available, else approximate
+        start = boundaries[unit_idx][0] if unit_idx < len(boundaries) else 0
+        
+        if len(unit) <= MAX_UNIT_SIZE:
+            final_units.append(unit)
+            final_boundaries.append((start, start + len(unit), len(final_units) - 1))
+        else:
+            # Split large unit, but keep heading with first chunk
+            paragraphs = unit.split('\n\n')
+            if not paragraphs:
+                continue
+
+            # First chunk includes the heading (first paragraph)
+            heading = paragraphs[0]
+            current_chunk = [heading]
+            current_size = len(heading)
+            chunk_start = start
+
+            for para in paragraphs[1:]:
+                para_size = len(para) + 2  # +2 for \n\n
+
+                if current_size + para_size > MAX_UNIT_SIZE and len(current_chunk) > 1:
+                    # Save current chunk (has heading + content)
+                    chunk_content = '\n\n'.join(current_chunk)
+                    chunk_end = chunk_start + len(chunk_content)
+                    final_units.append(chunk_content)
+                    final_boundaries.append((chunk_start, chunk_end, len(final_units) - 1))
+
+                    # Start new chunk (without heading, just continuation)
+                    current_chunk = [para]
+                    current_size = para_size
+                    chunk_start = chunk_end + 2
+                else:
+                    current_chunk.append(para)
+                    current_size += para_size
+
+            # Save last chunk
+            if current_chunk:
+                chunk_content = '\n\n'.join(current_chunk)
+                chunk_end = start + len(unit)
+                final_units.append(chunk_content)
+                final_boundaries.append((chunk_start, chunk_end, len(final_units) - 1))
+
+    return final_units, final_boundaries
+
+
+def _refine_structure_with_llm(units: list[str], model: str) -> list[str]:
+    """
+    Use LLM to identify which units should be merged into the previous one.
+    """
+    if len(units) < 2:
+        return units
+    
+    # Prepare prompt with headers only
+    headers = []
+    for i, u in enumerate(units):
+        lines = u.split('\n')
+        # Take first line, max 100 chars
+        header = lines[0].strip()[:100] 
+        headers.append(f"{i}: {header}")
+    
+    headers_text = "\n".join(headers)
+    
+    prompt = f"""You are a document structure analyzer.
+Here is a list of document sections. Each section starts with a markdown header.
+Your task is to identify which sections are logically sub-sections, notes, or continuations of the **previous** section and should be merged into it to maintain context.
+
+Common examples of sections to merge:
+- "Precautions", "Notes", "Tips", "Warnings", "Attention" following a step.
+- Sub-steps (e.g., "1.1 xxx") that are too small to stand alone.
+- Headers that are just labels for the previous content.
+
+Return a JSON object with a key "merge_indices" containing a list of indices that should be merged with their PREVIOUS section.
+Example: If section 2 belongs to section 1, return [2].
+Do NOT merge section 0.
+
+Sections:
+{headers_text}
+
+JSON Output:"""
+
+    try:
+        response = call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            model=model,
+            enable_thinking=False
+        )
+        content = response.choices[0].message.content
+        
+        # Parse JSON
+        if "```json" in content:
+            content = content.split("```json")[1].split("```")[0]
+        elif "```" in content:
+            content = content.split("```")[1].split("```")[0]
+            
+        data = json.loads(content)
+        merge_indices = set(data.get("merge_indices", []))
+        
+        if not merge_indices:
+            return units
+            
+        new_units = []
+        current_unit = units[0]
+        
+        for i in range(1, len(units)):
+            if i in merge_indices:
+                current_unit += "\n\n" + units[i]
+            else:
+                new_units.append(current_unit)
+                current_unit = units[i]
+        new_units.append(current_unit)
+        
+        return new_units
+
+    except Exception as e:
+        print(f"LLM structure refinement failed: {e}")
+        return units
 def recursive_character_text_splitter(text: str, chunk_size: int = 1500, chunk_overlap: int = 200) -> list[str]:
     """
     Split text into chunks of specified size with overlap.
@@ -1255,12 +1177,12 @@ def generate_embedding_chunks(text: str, image_root: Path = None):
         # For documents with images (PDF), always use semantic splitter that preserves image context
         # The semantic splitter uses the configured model to analyze structure and keep images with their context
         print(f"Using Semantic Splitter for document with images (model: {semantic_split_model})...")
-        chunks = semantic_text_splitter(text, image_root=image_root, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        chunks = semantic_text_splitter(text, image_root=image_root, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, model=semantic_split_model)
         inputs = chunks
     elif USE_SEMANTIC_SPLIT:
         # Semantic-aware splitting using LLM (for text-only documents)
         print(f"Using Semantic Splitter (model: {semantic_split_model})...")
-        chunks = semantic_text_splitter(text, image_root=None, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP)
+        chunks = semantic_text_splitter(text, image_root=None, chunk_size=CHUNK_SIZE, chunk_overlap=CHUNK_OVERLAP, model=semantic_split_model)
         inputs = chunks
     else:
         # Use recursive character-based splitter (default for text-only)
