@@ -24,18 +24,18 @@ class MinerUClient:
         else:
             self.proxies = {"http": None, "https": None}  # Disable proxies
 
-    def submit_task(self, file_url: str, is_ocr: bool = False) -> str:
+    def submit_task(self, file_url: str, is_ocr: bool = False, model_version: str = "vlm") -> str:
         """Submit a PDF extraction task."""
         url = f"{self.base_url}/extract/task"
         data = {
             "url": file_url,
             "is_ocr": is_ocr,
-            "model_version": "vlm",  # Use VLM as per user preference/example
+            "model_version": model_version,
             "enable_table": True,
             "enable_formula": True
         }
         
-        print(f"Submitting MinerU task for URL: {file_url[:50]}...")
+        print(f"Submitting MinerU task for URL: {file_url[:50]}... (model: {model_version})")
         resp = requests.post(url, headers=self.headers, json=data, proxies=self.proxies)
         
         try:

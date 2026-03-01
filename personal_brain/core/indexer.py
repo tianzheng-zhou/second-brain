@@ -896,10 +896,34 @@ def _process_pdf(file_path: Path) -> tuple[str, Path]:
         
         # 3. Submit to MinerU
         print(f"Submitting to MinerU...")
-        task_id = mineru.submit_task(url, is_ocr=True)
         
-        # 4. Wait for result
-        zip_url = mineru.wait_for_completion(task_id)
+        try:
+            # Try with default VLM model first (best quality)
+            task_id = mineru.submit_task(url, is_ocr=True, model_version="vlm")
+            zip_url = mineru.wait_for_completion(task_id)
+        except Exception as e:
+            # If VLM fails (e.g. complexity, timeout), retry with 'pipeline' model (standard layout analysis)
+            error_msg = str(e).lower()
+            if "task failed" in error_msg or "retry limit reached" in error_msg or "timeout" in error_msg:
+                print(f"MinerU 'vlm' model failed ({e}). Retrying with 'pipeline' model...")
+                # Note: 'pipeline' (formerly known as 'layout' or 'standard') is the correct API model name for non-VLM
+                try:
+                    task_id = mineru.submit_task(url, is_ocr=True, model_version="pipeline")
+                    zip_url = mineru.wait_for_completion(task_id)
+                except Exception as retry_e:
+                     # If pipeline also fails, maybe try 'layout' just in case the API uses different names across versions?
+                     # But search results strongly suggest 'pipeline'.
+                     # Let's catch specifically the "field invalid" error to be safe.
+                     if "field" in str(retry_e).lower() and "invalid" in str(retry_e).lower():
+                         print(f"MinerU 'pipeline' model rejected. Trying 'layout' as last resort...")
+                         task_id = mineru.submit_task(url, is_ocr=True, model_version="layout")
+                         zip_url = mineru.wait_for_completion(task_id)
+                     else:
+                         raise retry_e
+            else:
+                raise e  # Re-raise other errors (e.g. auth, network)
+        
+        # 4. Wait for result (handled above)
         
         # 5. Download and extract
         # Create cache dir based on file hash or name
