@@ -504,8 +504,12 @@ def run_server(transport: str = "stdio", host: str = "0.0.0.0", port: int = 8765
     if transport == "stdio":
         mcp.run(transport="stdio")
     elif transport == "sse":
-        mcp.run(transport="sse", host=host, port=port)
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport="sse")
     elif transport in ("streamhttp", "stream-http", "http"):
-        mcp.run(transport="streamable-http", host=host, port=port)
+        mcp.settings.host = host
+        mcp.settings.port = port
+        mcp.run(transport="streamable-http")
     else:
         raise ValueError(f"Unknown transport: {transport}")
