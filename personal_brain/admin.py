@@ -4,15 +4,21 @@ Run: streamlit run personal_brain/admin.py
 """
 from __future__ import annotations
 
+import sys
 import json
 from pathlib import Path
+
+# Allow running via `streamlit run personal_brain/admin.py` (no package context)
+if __package__ is None or __package__ == "":
+    sys.path.insert(0, str(Path(__file__).parent.parent))
+    import personal_brain  # noqa: F401 — ensures package is importable
 
 import streamlit as st
 
 # Initialize DB on startup
 @st.cache_resource
 def _init():
-    from . import database as db
+    from personal_brain import database as db
     db.init_db()
     return db
 
@@ -42,7 +48,7 @@ with tab_ingest:
                 else:
                     with st.spinner("Ingesting..."):
                         try:
-                            from .ingestion import process_directory, process_file
+                            from personal_brain.ingestion import process_directory, process_file
                             if p.is_dir():
                                 result = process_directory(p)
                                 st.success(
@@ -71,7 +77,7 @@ with tab_ingest:
         )
         if uploaded and st.button("Process Uploaded Files"):
             import tempfile
-            from .ingestion import process_file
+            from personal_brain.ingestion import process_file
             success = 0
             errors = []
             for uf in uploaded:
@@ -144,7 +150,7 @@ with tab_manage:
                 col_a, col_b, col_c = st.columns([3, 1, 1])
                 col_a.text(str(op))
                 if col_b.button("Re-ingest", key=f"re_{op}"):
-                    from .ingestion import process_file
+                    from personal_brain.ingestion import process_file
                     try:
                         result = process_file(op)
                         st.success(f"Ingested: {result['file_id']}")
@@ -174,7 +180,7 @@ with tab_manage:
                     "Created": f.created_at.strftime("%Y-%m-%d %H:%M") if f.created_at else "",
                 })
             df = pd.DataFrame(rows)
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, width="stretch")
 
             st.subheader("Single File Operations")
             file_ids = [f.id for f in files]
@@ -182,7 +188,7 @@ with tab_manage:
             if selected_id:
                 col1, col2, col3, col4, col5 = st.columns(5)
                 if col1.button("Refresh Index"):
-                    from .ingestion import refresh_index_for_file
+                    from personal_brain.ingestion import refresh_index_for_file
                     try:
                         result = refresh_index_for_file(selected_id)
                         st.success(f"Index refreshed: {result}")
@@ -222,7 +228,7 @@ with tab_manage:
 with tab_config:
     st.header("Runtime Configuration")
 
-    from . import config_manager
+    from personal_brain import config_manager
 
     config = config_manager.get_all()
 
