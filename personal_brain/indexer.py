@@ -56,21 +56,18 @@ def extract_text(path: Path, file_type: str) -> tuple[str, Optional[Path]]:
 
 
 def _extract_pdf(path: Path) -> tuple[str, Optional[Path]]:
-    """Try MinerU first, fallback to Pillow + Vision OCR."""
+    """Parse PDF via MinerU. Raises if MinerU is unavailable or fails."""
     from .config import MINERU_API_TOKEN
 
-    if MINERU_API_TOKEN:
-        try:
-            from .utils.mineru import parse_pdf
-            from .utils.file_ops import calculate_file_id
-            file_hash = calculate_file_id(path)
-            md_text, image_root = parse_pdf(path, file_hash[:8])
-            logger.info("PDF parsed via MinerU", extra={"path": str(path)})
-            return md_text, image_root
-        except Exception as e:
-            logger.warning("MinerU failed, falling back to local OCR", extra={"error": str(e)})
+    if not MINERU_API_TOKEN:
+        raise RuntimeError("MINERU_API_TOKEN not set. PDF ingestion requires MinerU.")
 
-    return _extract_pdf_local(path), None
+    from .utils.mineru import parse_pdf
+    from .utils.file_ops import calculate_file_id
+    file_hash = calculate_file_id(path)
+    md_text, image_root = parse_pdf(path, file_hash[:8])
+    logger.info("PDF parsed via MinerU", extra={"path": str(path)})
+    return md_text, image_root
 
 
 def _extract_pdf_local(path: Path) -> str:

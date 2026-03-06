@@ -20,7 +20,7 @@ from ..config import (
     MINERU_USE_SYSTEM_PROXY,
     STORAGE_PATH,
 )
-from ..utils.aliyun_oss import delete_file, upload_file
+from ..utils.aliyun_oss import upload_file
 from ..utils.logger import get_module_logger
 
 logger = get_module_logger(__name__)
@@ -30,11 +30,10 @@ _MAX_WAIT = 1800  # 30 minutes
 
 
 def _get_client() -> httpx.Client:
-    proxies = None if MINERU_USE_SYSTEM_PROXY else {}
     return httpx.Client(
         timeout=60,
         headers={"Authorization": f"Bearer {MINERU_API_TOKEN}"},
-        **({"proxies": proxies} if proxies is not None else {}),
+        trust_env=MINERU_USE_SYSTEM_PROXY,
     )
 
 
@@ -56,19 +55,13 @@ def parse_pdf(pdf_path: Path, file_hash_prefix: str) -> tuple[str, Path]:
     oss_key = f"mineru_tmp/{uuid.uuid4()}.pdf"
     oss_url = upload_file(pdf_path, oss_key)
 
-    try:
-        task_id = _submit_mineru_task(oss_url, pdf_path.name)
-        zip_path = _poll_and_download(task_id, cache_dir)
-        md_text = _extract_zip(zip_path, cache_dir)
-        # Copy PDF to cache
-        import shutil
-        shutil.copy2(pdf_path, cache_dir / "original.pdf")
-        return md_text, cache_dir
-    finally:
-        try:
-            delete_file(oss_key)
-        except Exception as e:
-            logger.warning("Failed to delete MinerU OSS temp", extra={"oss_key": oss_key, "error": str(e)})
+    task_id = _submit_mineru_task(oss_url, pdf_path.name)
+    zip_path = _poll_and_download(task_id, cache_dir)
+    md_text = _extract_zip(zip_path, cache_dir)
+    # Copy PDF to cache
+    import shutil
+    shutil.copy2(pdf_path, cache_dir / "original.pdf")
+    return md_text, cache_dir
 
 
 def _submit_mineru_task(oss_url: str, filename: str) -> str:
@@ -102,9 +95,11 @@ def _poll_and_download(task_id: str, cache_dir: Path) -> Path:
             state = (data.get("data") or data).get("state", "")
 
             if state == "done":
-                zip_url = (data.get("data") or data).get("zip_url", "")
+                inner = data.get("data") or data
+                zip_url = inner.get("zip_url") or inner.get("full_zip_url") or inner.get("result_url") or inner.get("download_url") or ""
                 if not zip_url:
-                    raise RuntimeError("MinerU done but no zip_url")
+                    logger.error("MinerU done but no zip_url found", extra={"task_id": task_id, "response": data})
+                    raise RuntimeError(f"MinerU done but no zip_url in response: {data}")
                 zip_path = cache_dir / "result.zip"
                 zip_resp = client.get(zip_url)
                 zip_path.write_bytes(zip_resp.content)
@@ -112,7 +107,8 @@ def _poll_and_download(task_id: str, cache_dir: Path) -> Path:
                 return zip_path
 
             if state == "failed":
-                raise RuntimeError(f"MinerU task {task_id} failed")
+                detail = (data.get("data") or data).get("err_msg") or str(data)
+                raise RuntimeError(f"MinerU task {task_id} failed: {detail}")
 
             logger.debug("MinerU polling", extra={"task_id": task_id, "state": state})
             time.sleep(_POLL_INTERVAL)

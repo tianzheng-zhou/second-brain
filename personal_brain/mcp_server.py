@@ -4,8 +4,8 @@ Supports stdio, SSE, and Streamable HTTP transports.
 """
 from __future__ import annotations
 
-import asyncio
 import json
+import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -330,7 +330,7 @@ def ingest_file(path: str, async_mode: bool = True) -> str:
         task_id = db.create_task("ingest", path)
         db.update_task(task_id, "running")
 
-        async def _run():
+        def _run():
             try:
                 if file_path.is_dir():
                     result = process_directory(file_path)
@@ -340,7 +340,7 @@ def ingest_file(path: str, async_mode: bool = True) -> str:
             except Exception as e:
                 db.update_task(task_id, "failed", json.dumps({"error": str(e)}))
 
-        asyncio.create_task(_run())
+        threading.Thread(target=_run, daemon=True).start()
         return _ok({"task_id": task_id})
     else:
         try:
@@ -419,7 +419,11 @@ def refresh_index(file_id: Optional[str] = None) -> str:
     else:
         task_id = db.create_task("refresh_index")
         db.update_task(task_id, "running")
-        asyncio.create_task(refresh_index_global(task_id))
+        import asyncio
+        threading.Thread(
+            target=lambda: asyncio.run(refresh_index_global(task_id)),
+            daemon=True,
+        ).start()
         return _ok({"task_id": task_id})
 
 

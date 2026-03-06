@@ -27,13 +27,12 @@ def _get_bucket():
         raise RuntimeError("oss2 package not installed. Run: pip install oss2")
 
 
-def upload_file(local_path: Path, oss_key: str) -> str:
-    """Upload a file to OSS and return the OSS URL."""
+def upload_file(local_path: Path, oss_key: str, signed_url_expires: int = 3600) -> str:
+    """Upload a file to OSS and return a signed URL (valid for *signed_url_expires* seconds)."""
     bucket = _get_bucket()
     with local_path.open("rb") as f:
         bucket.put_object(oss_key, f)
-    from personal_brain.config import ALIYUN_OSS_ENDPOINT, ALIYUN_OSS_BUCKET
-    url = f"https://{ALIYUN_OSS_BUCKET}.{ALIYUN_OSS_ENDPOINT}/{oss_key}"
+    url = bucket.sign_url("GET", oss_key, signed_url_expires)
     logger.info("OSS upload complete", extra={"oss_key": oss_key, "url": url})
     return url
 
