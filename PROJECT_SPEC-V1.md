@@ -17,6 +17,7 @@
 8. [管理后台](#8-管理后台)
 9. [CLI 工具](#9-cli-工具)
 10. [已知设计约束与限制](#10-已知设计约束与限制)
+11. [可观测性](#11-可观测性)
 
 ---
 
@@ -92,7 +93,10 @@ MCP ingest_file(async) / CLI ingest / Admin 上传
     → 创建 task 记录（status=pending）
     → ingestion.process_file()
         → calculate_file_id() [SHA256 前16位]
-        → 【去重检查】若 file_id 已存在于 files 表 → 直接返回已有记录，跳过后续步骤
+        → 【去重检查】查询 files 表：
+            → file_id 存在且 status='active'   → 直接返回已有记录，跳过后续步骤
+            → file_id 存在且 status='archived' → UPDATE status='active'（重激活），直接返回已有记录，跳过后续步骤
+            → file_id 不存在                   → 继续入库流程
         → organize_file() [复制到 STORAGE_PATH/YYYY-MM/]
         → extract_text() [根据类型选择解析器]
             → PDF: MinerU API → 提取MD → 保存到 processed/{file_id}.md
@@ -116,13 +120,14 @@ MCP ingest_file(async) / CLI ingest / Admin 上传
 
 **数据流（混合搜索）：**
 ```
-MCP search / CLI search
-    → search_files(query, limit, ...)
-        → 向量分支: generate_embedding(query) → vec_items KNN
-        → 全文分支: fts_chunks FTS5 MATCH → BM25 评分
-        → 融合去重 + 归一化评分
+MCP search(混合) / search_semantic(纯向量) / search_keyword(纯全文) / search_notes(纯笔记)
+    → search.py 对应函数(query, limit, ...)
+        → [混合/语义分支] generate_embedding(query) → vec_items KNN
+        → [混合/全文分支] fts_chunks FTS5 MATCH → BM25 评分
+        → [混合] RRF 融合（score = Σ 1/(60 + rank_i)），去重
+        → 排除 archived 状态，按 source_type / time_range 过滤
         → 可选 Rerank
-        → 返回结果列表（含溯源信息：source_file_id, chunk_index, page_number）
+        → 返回 SearchResult 列表（含溯源信息：source_file_id, chunk_index, page_number）
 ```
 
 ---
@@ -153,26 +158,41 @@ status              TEXT              -- active / archived
 #### `vec_items` 虚拟表（sqlite-vec）
 统一向量索引，通过 `source_type` + `source_id` 标识来源。
 
-> **实现注意**：sqlite-vec 的 `vec0` 虚拟表对辅助列（非向量列）的支持取决于版本。若不支持文本辅助列，需改用独立的 `vec_metadata` 普通表做映射（rowid 对应）。实现前须验证当前 sqlite-vec 版本的能力。
+**版本检测（`init_db()` 阶段自动执行）：**
+
+sqlite-vec 的 `vec0` 虚拟表对辅助文本列（非向量列）的支持取决于版本，`init_db()` 在初始化时自动检测并选择方案：
+
+```python
+# 检测辅助列支持（in init_db()）
+try:
+    conn.execute("CREATE VIRTUAL TABLE _vec_test USING vec0(x float[1], y TEXT)")
+    conn.execute("DROP TABLE _vec_test")
+    vec_impl = "aux_column"   # 方案 A：辅助列直接存在虚拟表中
+except:
+    vec_impl = "metadata_table"  # 方案 B：降级，独立 vec_metadata 表
+# 将 vec_impl 写入 model_config.json，后续操作据此分支
+```
 
 ```sql
--- 理想方案（若 vec0 支持辅助文本列）：
+-- 方案 A（vec_impl = "aux_column"）：
 CREATE VIRTUAL TABLE vec_items USING vec0(
     embedding float[2560],
     source_type TEXT,   -- 'chunk' / 'entry'
     source_id   TEXT    -- 对应 file_chunks.id 或 entries.id
 )
 
--- 降级方案（若不支持）：
+-- 方案 B（vec_impl = "metadata_table"）：
 CREATE VIRTUAL TABLE vec_items USING vec0(embedding float[2560])
 CREATE TABLE vec_metadata (
-    rowid       INTEGER PRIMARY KEY,  -- 对应 vec_items 的 rowid
-    source_type TEXT,
-    source_id   TEXT
+    rowid       INTEGER PRIMARY KEY REFERENCES vec_items(rowid),
+    source_type TEXT NOT NULL,
+    source_id   TEXT NOT NULL
 )
+CREATE INDEX idx_vec_metadata_source ON vec_metadata(source_type, source_id)
 ```
 
-> 搜索时直接从 vec_items 获取 source_type + source_id，JOIN 到对应表取内容，避免 N+1 查询。
+> - 两种方案对上层代码透明：`database.py` 的向量读写函数内部按 `vec_impl` 分支处理，其他模块无感知。
+> - 搜索时通过 rowid JOIN vec_metadata（方案 B）或直接读辅助列（方案 A），均避免 N+1 查询。
 
 #### `file_chunks` 表
 文件分块内容，含位置信息用于溯源。
@@ -297,13 +317,15 @@ updated_at  TIMESTAMP
   "use_semantic_split": false,
   "semantic_split_model": "qwen3.5-flash",
   "chunk_size": 1500,
-  "chunk_overlap": 200
+  "chunk_overlap": 200,
+  "vec_impl": "aux_column"
 }
 ```
 
 > - Embedding 维度：2560（qwen3-vl-embedding）
 > - 阿里云百炼同样提供了 kimi-k2.5 的 API 服务
 > - 若更换 embedding 模型导致维度变化，需重建所有向量索引（可通过全局 refresh_index 实现）
+> - `vec_impl` 由 `init_db()` 自动检测写入，**不应手动修改**；若手动改动导致与实际表结构不一致，可通过 `reset_db()` 重建解决
 
 ---
 
@@ -316,13 +338,18 @@ updated_at  TIMESTAMP
 **连接管理：**
 
 - 使用模块级单连接（`sqlite3.connect`），进程生命周期内复用
-- 启用 WAL 模式，支持并发读取
+- 启用 WAL 模式（`PRAGMA journal_mode=WAL`），支持并发读取
 - 写入操作通过 SQLite 内部锁序列化，无需应用层写入队列
 - 连接配置：`check_same_thread=False`（允许跨线程使用，asyncio 场景需要）
+- 设置 `busy_timeout=10000`（10秒），并发写入时等待而非立即报错
 
 **初始化：**
 
-- `init_db()`：创建所有表和虚拟表（若不存在），加载 sqlite-vec 扩展，启用 WAL 模式
+- `init_db()`：
+  1. 加载 sqlite-vec 扩展
+  2. 启用 WAL 模式
+  3. **检测 sqlite-vec 辅助列支持**（见 Section 4 vec_items），写入 `vec_impl` 到 model_config.json
+  4. 按检测结果创建 `vec_items`（及可能的 `vec_metadata`）和其他所有表/虚拟表
 - `reset_db()`：删除并重建数据库（带二次确认）
 
 **文件操作：**
@@ -443,55 +470,101 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 **`process_file(file_path)` 完整流程：**
 
 1. 计算文件内容 SHA256[:16] 作为 `file_id`
-2. 查询 DB，已存在则直接返回（去重）
-3. `organize_file()`：将文件复制到 `STORAGE_PATH/YYYY-MM/filename`（同名不同内容自动重命名）
+2. **去重检查**：
+   - `status='active'`：直接返回已有记录，跳过全部后续步骤
+   - `status='archived'`：调用 `update_file_status(file_id, 'active')` 重激活后返回
+   - 不存在：继续
+3. `organize_file()`：将文件复制到 `STORAGE_PATH/YYYY-MM/filename`（同名不同内容自动追加后缀重命名，如 `file_1.txt`）
 4. 确定文件类型（扩展名优先）
 5. `extract_text()`：提取文本内容，保存处理后文本到 `processed/`
 6. `save_file()`：写入 files 表（含 processed_text_path）
 7. 生成 Embedding chunks 并保存（所有文件均索引）
 8. `enrich_file()`：自动摘要 + 标签提取
 
-**`refresh_index_for_file(file_id)` 重建索引：**
-1. 重新提取文本，更新 processed 文件
-2. 删除旧 chunks/embeddings/FTS 数据
-3. 重新生成 chunks + embeddings
-4. 重新运行 `enrich_file()`
+**`refresh_index_for_file(file_id)` 重建索引（完整事务保护）：**
+
+> 任何步骤失败均完整回滚，不留中间状态。操作完成前，原索引保持可用。
+
+```text
+1. 确认 file_id 存在于 files 表（否则抛 FileNotFoundError）
+2. 重新提取文本 → 写入临时路径 {processed_dir}/{file_id}.md.tmp
+   [失败] → 删除临时文件，抛错，原数据完整保留
+3. BEGIN SAVEPOINT refresh_{file_id}
+4.   删除旧 file_chunks（级联删除 vec_items(chunk) + fts_chunks）
+5.   删除旧 auto_enrichment entries（仅删除只关联此文件的条目及其 vec_items）
+6.   生成新 chunks → 写入 file_chunks + vec_items + fts_chunks
+7.   重新运行 enrich_file() → 生成新 entry + embedding → 写入 vec_items
+   [步骤 4-7 任何失败] → ROLLBACK SAVEPOINT，删除临时文件，抛错，原数据完整保留
+8. RELEASE SAVEPOINT（提交）
+9. 原子 rename：{file_id}.md.tmp → {file_id}.md
+   [失败] → rename 不影响 DB 数据；记录警告日志，下次 refresh 会重建 processed 文件
+10. 若 processed_text_path 有变化，UPDATE files 表
+```
+
+**`refresh_index_global()` 全局重建（异步，返回 task_id）：**
+
+- 依次对每个 active 文件调用 `refresh_index_for_file()`
+- 单文件失败记录错误、继续处理后续文件（不中断整体任务）
+- 返回汇总结果：成功数、失败数及失败原因列表
 
 ### 6.5 search.py — 混合搜索
 
-采用**向量语义搜索 + FTS5 全文检索**的混合策略，兼顾语义理解和精确关键词匹配。
+提供四种独立搜索函数，MCP 层逐一暴露为 MCP 工具，客户端按场景选择。
 
-**`search_files(query, limit, use_rerank, time_range, source_type, file_id)`：**
+**公共参数说明：**
 
-**参数说明：**
+- `limit`：最终返回结果数上限
+- `time_range`：时间过滤元组 `(start_datetime, end_datetime)`，过滤 `created_at`
+- `use_rerank`：是否启用 DashScope Rerank 精排（仅混合搜索支持）
+- `file_id`（仅 `search_in_document`）：限定在某个文件的 chunks 范围内搜索
 
-- `file_id`（可选）：限定在某个文件的 chunks 范围内搜索，用于 `read_document` 带 query 的场景
-- `source_type`（可选）：过滤结果类型，`"chunk"` 只返回文件分块，`"entry"` 只返回笔记
-- `time_range`（可选）：时间过滤元组 `(start_datetime, end_datetime)`
+**四种搜索函数：**
 
-**流程：**
+| 函数名 | 向量 | FTS5 | 融合 | 结果类型 |
+| ------ | :--: | :--: | :--: | -------- |
+| `search_hybrid` | ✓ | ✓ | RRF | chunks + entries |
+| `search_semantic` | ✓ | — | — | chunks + entries |
+| `search_keyword` | — | ✓ | — | 仅 chunks |
+| `search_notes` | ✓ | — | — | 仅 entries |
 
-1. **向量搜索分支**：
-   - 生成查询 Embedding
-   - 在 `vec_items` 表执行 KNN（sqlite-vec MATCH）
-   - 初始候选量：`max(100, limit * 20)`
-   - 通过 `source_type` + `source_id` 直接 JOIN 到 file_chunks / entries
-2. **全文检索分支**：
-   - 在 `fts_chunks` 表执行 FTS5 MATCH 查询
-   - 返回 BM25 评分的候选列表
-   - **注意：FTS5 仅索引 file_chunks，不索引 entries**。因此纯关键词匹配无法命中笔记，笔记仅通过向量搜索可达。这是当前版本的设计取舍——entries 通常是摘要文本，向量搜索已足够覆盖。
-3. **结果融合**：
-   - 合并两路结果，去重（同一 source_id 取较高分）
-   - 统一归一化评分
-4. 排除 `archived` 状态的文件/条目（归档内容不参与搜索）
-5. 按 `source_type` 过滤（chunk / entry）
-6. 按时间范围过滤（`time_range` 元组）
-7. 可选 Rerank（via DashScope REST API）
-8. 返回 `SearchResult` 列表，字段含义因 source_type 不同而异：
+> **注意：FTS5 仅索引 file_chunks，不索引 entries**。`search_keyword` 不会命中笔记，`search_notes` 不会命中文件分块。
+
+**RRF 融合算法（Reciprocal Rank Fusion，`search_hybrid` 使用）：**
+
+```python
+# RRF: score(d) = Σ 1 / (k + rank_i(d))，k=60（标准参数）
+# 对每条结果，将其在向量排名和全文排名中的 RRF 分数相加
+def rrf_merge(vector_results, fts_results, k=60):
+    scores = {}
+    for rank, (source_id, _) in enumerate(vector_results):
+        scores[source_id] = scores.get(source_id, 0) + 1 / (k + rank + 1)
+    for rank, (source_id, _) in enumerate(fts_results):
+        scores[source_id] = scores.get(source_id, 0) + 1 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda x: x[1], reverse=True)
+```
+
+> RRF 无需显式归一化两路分数，对异常分布更鲁棒，是混合搜索融合的推荐方案。
+
+**完整搜索流程（以 `search_hybrid` 为例）：**
+
+1. 生成查询 Embedding → vec_items KNN（候选量：`max(100, limit * 20)`）
+2. fts_chunks FTS5 MATCH（候选量同上）
+3. RRF 融合，得到候选列表
+4. 排除 `archived` 状态的文件/条目
+5. 按 `time_range` 过滤
+6. 可选 Rerank（via DashScope REST API）
+7. 截取 top `limit` 返回
+
+**`search_in_document(file_id, query, limit)`（`read_document` 内部使用）：**
+
+- 纯向量搜索，限定 `file_id` 范围内的 chunks
+- 不对外暴露为独立 MCP 工具，由 `read_document` 带 query 时调用
+
+**SearchResult 字段说明（因 source_type 不同而异）：**
 
 | 字段 | chunk 结果 | entry 结果 |
-| ------ | ------ | ------ |
-| `score` | 归一化评分 | 归一化评分 |
+| ---- | --------- | --------- |
+| `score` | RRF 或向量距离转换值 | 同左 |
 | `content` | chunk 文本片段 | entry 完整内容 |
 | `source_type` | `"chunk"` | `"entry"` |
 | `source_file_id` | 所属文件 ID | `None`（笔记不一定关联文件） |
@@ -534,6 +607,7 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 - 供 enrichment（摘要/标签提取）和 indexer（语义分块）使用
 - 自动识别"思考模型"（模型名包含 `qwen3` 或 `qwq` 等关键词），默认关闭 `enable_thinking`（通过 `extra_body` 参数传递）
 - 模型名从 `config_manager` 动态读取
+- **无降级策略**：API 调用失败时使用 tenacity 重试（最多3次，指数退避），重试耗尽后直接抛出异常，不降级到备用模型。精度和性能优先，由调用方决定如何处理异常。
 
 ### 6.9 工具模块（utils/）
 
@@ -543,6 +617,8 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 | `asr_client.py` | 音频转写客户端，调用 DashScope ASR API（上传 → 轮询 → 取结果） |
 | `file_ops.py` | 文件类型识别（扩展名映射）、SHA256 哈希计算、存储目录组织（YYYY-MM 归档） |
 | `mineru.py` | MinerU PDF 解析 API 客户端（提交任务 → 轮询 → 下载 ZIP → 提取 MD），含本地缓存 |
+| `logger.py` | 结构化日志封装（见 Section 11） |
+| `metrics.py` | 性能指标收集（见 Section 11） |
 
 ---
 
@@ -558,52 +634,67 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 
 | 工具名 | 参数 | 功能 |
 |--------|------|------|
-| `search` | `query: str, limit: int = 5, time_range?: str, source_type?: str` | 混合搜索（向量+全文），返回结果含溯源信息（source_file_id, chunk_index, page_number） |
+| `search` | `query: str, limit: int = 5, time_range?: str, use_rerank?: bool` | **混合搜索**（向量 + FTS5，RRF 融合），返回 chunks + entries，含溯源信息 |
+| `search_semantic` | `query: str, limit: int = 5, time_range?: str` | **纯向量语义搜索**，命中 chunks 和 entries，适合模糊语义查询 |
+| `search_keyword` | `query: str, limit: int = 5, time_range?: str` | **纯全文关键词搜索**（FTS5），仅命中 file chunks，适合精确词语匹配 |
+| `search_notes` | `query: str, limit: int = 5, tag?: str` | **笔记专项搜索**（向量搜索，仅 entries），可按 tag 预过滤 |
 | `read_note` | `entry_id: str` | 按 ID 读取某条笔记的完整内容 |
-| `read_document` | `file_id: str, query?: str` | 读取文件的处理后文本；大文件可带 query 做局部检索（见下方说明） |
-| `list_notes` | `tag?: str, source?: str, limit?: int, offset?: int` | 列出笔记，支持按 tag/来源过滤和分页。返回列表及 `total_count`（符合过滤条件的总数，用于分页） |
+| `read_document` | `file_id: str, query?: str` | 读取文件的处理后文本；大文件可带 query 做局部向量检索（见下方说明） |
+| `list_notes` | `tag?: str, source?: str, limit?: int, offset?: int` | 列出笔记，支持按 tag/来源过滤和分页。返回列表及 `total_count`（总数，用于分页） |
 | `list_files` | `type?: str, status?: str, limit?: int, offset?: int` | 列出文件，支持按类型/状态过滤和分页。返回列表及 `total_count` |
-| `get_file_info` | `file_id: str` | 获取文件元信息（大小、类型、创建时间等）及关联的 enrichment 摘要和 tags（通过 `entry_files` JOIN `entries` 获取 `source='auto_enrichment'` 的条目） |
+| `get_file_info` | `file_id: str` | 获取文件元信息（大小、类型、创建时间等）及关联的 enrichment 摘要和 tags |
+
+**`time_range` 参数（适用于 `search`、`search_semantic`、`search_keyword`）：**
+
+- 格式：自然语言时间表达，使用 dateparser 解析（如 `"最近一周"`、`"2024年1月到3月"`、`"last 7 days"`）
+- 解析后转为 `(start_datetime, end_datetime)` 元组，过滤 `created_at` 字段
 
 **`read_document` 的 `query` 参数：**
 
 - 不带 query：返回完整的处理后文本
-- 带 query：在该文件的 chunks 中进行向量相似度搜索，返回最相关的片段而非全文。适用于大文件（如长 PDF），避免返回过多内容
-
-**`search` 的 `time_range` 参数：**
-
-- 格式：自然语言时间表达，使用 dateparser 解析（如 `"最近一周"`、`"2024年1月到3月"`、`"last 7 days"`）
-- 解析后转为 `(start_datetime, end_datetime)` 元组，用于过滤 `created_at` 字段
+- 带 query：在该文件的 chunks 中进行向量相似度搜索，返回最相关的片段（适合长 PDF）
 
 #### 写入与修改
 
 | 工具名 | 参数 | 功能 |
 |--------|------|------|
-| `write_note` | `content: str, tags?: list[str], file_paths?: list[str]` | 写入笔记并生成 Embedding（写入 vec_items）；可附带文件路径（同步 ingest 后通过 entry_files 关联） |
+| `write_note` | `content: str, tags?: list[str], file_paths?: list[str]` | 写入笔记并生成 Embedding（写入 vec_items）；可附带文件路径（同步 ingest 后通过 entry_files 关联）。返回：`{entry_id, created_at, linked_file_ids, failed_paths}` |
 | `update_note` | `entry_id: str, content?: str, tags?: list[str]` | 修改笔记内容或 tags；若 content 变化，重新生成 Embedding 并更新 vec_items |
 | `delete_note` | `entry_id: str, confirm?: bool` | 删除笔记（级联删除关联向量和 entry_files）。确认行为同 `delete_file` |
-| `ingest_file` | `path: str, async?: bool = true` | 导入文件或目录；默认异步，返回 task_id。目录模式递归扫描所有支持格式的文件（见管理后台支持格式列表），忽略隐藏文件和目录 |
-| `delete_file` | `file_id: str, confirm?: bool` | 删除文件（级联删除关联的 chunks/embeddings/FTS/entries）。`confirm` 由 `DELETE_CONFIRMATION` 环境变量控制是否需要确认，默认 true |
+| `ingest_file` | `path: str, async?: bool = true` | 导入文件或目录；默认异步，返回 `{task_id}`。目录模式递归扫描所有支持格式的文件，忽略隐藏文件和目录 |
+| `delete_file` | `file_id: str, confirm?: bool` | 删除文件（级联删除关联的 chunks/embeddings/FTS/entries） |
 
-#### 系统管理
+**`delete_file` / `delete_note` 的 confirm 语义：**
 
-| 工具名 | 参数 | 功能 |
-|--------|------|------|
-| `get_stats` | 无 | 知识库统计（返回：总文件数、各类型文件数、总笔记数、总 chunk 数、总向量数、存储目录大小、数据库文件大小） |
-| `refresh_index` | `file_id?: str` | 重建索引。传 file_id 重建单文件；不传则重建所有文件（异步，返回 task_id） |
-| `get_task_status` | `task_id: str` | 查询异步任务状态和结果（入库进度、成功/失败等） |
+两个参数协同控制删除确认行为：
+
+| `DELETE_CONFIRMATION` 环境变量 | `confirm` 参数 | 行为 |
+| ----- | ----- | ----- |
+| `true`（默认） | 未传或 `false` | 返回确认提示，不执行删除 |
+| `true`（默认） | `true` | 直接删除（用户已在参数中确认） |
+| `false` | 任意值 | 直接删除，忽略 `confirm` 参数 |
 
 **`write_note` 的 `file_paths` 行为：**
 
 - 指定的文件路径会同步执行 ingest（非异步），等待所有文件入库完成后返回
 - 入库的文件通过 `entry_files` 关联到新创建的笔记
-- 若某文件已存在（去重命中），直接关联不重复入库
-- 若某文件 ingest 失败，笔记仍会创建，但失败的文件不关联，错误信息在返回值中说明
+- 若某文件已存在（去重命中，含 archived→active 重激活），直接关联不重复入库
+- 若某文件 ingest 失败，笔记仍会创建，失败的文件不关联，错误信息在 `failed_paths` 返回
+
+#### 系统管理
+
+| 工具名 | 参数 | 功能 |
+| ------ | ---- | ---- |
+| `get_stats` | 无 | 知识库统计（返回：总文件数、各类型文件数、总笔记数、总 chunk 数、总向量数、存储目录大小、数据库文件大小） |
+| `refresh_index` | `file_id?: str` | 重建索引（完整事务保护，失败全回滚）。传 file_id 重建单文件（同步）；不传则重建所有 active 文件（异步，返回 task_id） |
+| `get_task_status` | `task_id: str` | 查询异步任务状态和结果（入库进度、成功/失败等） |
+| `health_check` | 无 | 健康检查（见 Section 11），返回系统各组件状态 |
 
 **MCP 错误处理：**
 
 - 工具调用失败时返回 `is_error=True`，content 包含错误描述
 - 常见错误：文件不存在、entry_id 不存在、文件类型不支持、API 调用失败
+- `refresh_index` 失败时附带 `rollback=true` 字段，说明数据已回滚
 
 > MCP 工具是无状态的。对话历史、上下文管理、Agent 循环均由 MCP 客户端负责。
 
@@ -641,7 +732,7 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 | `init` | 无 | 初始化数据库和目录 |
 | `reset` | 无（带二次确认） | 删除并重建数据库 |
 | `ingest <path>` | 文件或目录路径 | 批量导入 |
-| `search <query>` | `--limit N, --source-type chunk\|entry` | 混合搜索（同 MCP search） |
+| `search <query>` | `--limit N, --mode hybrid\|semantic\|keyword\|notes` | 搜索（默认 hybrid 混合搜索，同 MCP search 系列工具） |
 | `serve` | `--transport, --port, --host` | 启动 MCP 服务器 |
 
 ---
@@ -659,3 +750,93 @@ Pydantic 模型，用于模块间数据传递和 MCP 返回值序列化。
 5. **Embedding 模型绑定**：更换不同维度的 embedding 模型需要重建全部向量索引。可通过对所有文件执行 `refresh_index` 实现，但耗时较长且期间搜索结果可能不完整。
 
 6. **SQLite 并发写入**：SQLite 同一时刻仅允许一个写事务。并发写入时 SQLite 通过内部锁自动序列化（配合 busy_timeout），无需应用层写入队列。但多个异步入库任务同时运行时可能出现锁等待。读取不受影响（WAL 模式）。
+
+---
+
+## 11. 可观测性
+
+### 11.1 结构化日志（utils/logger.py）
+
+使用 Python 标准 `logging` 模块，输出为 JSON 格式，便于后续解析和过滤。
+
+**日志级别规范：**
+
+| 级别 | 使用场景 |
+| ----- | -------- |
+| `DEBUG` | 文本提取进度、chunk 数量、Embedding 生成中间状态 |
+| `INFO` | 入库开始/完成、搜索执行（含参数）、任务状态变更 |
+| `WARNING` | rename 失败但不影响数据、enrichment 未完成、未知文件类型 |
+| `ERROR` | API 调用耗尽重试、数据库操作失败、refresh_index 回滚 |
+
+**日志字段：**
+
+```json
+{
+  "timestamp": "2026-03-06T12:00:00Z",
+  "level": "INFO",
+  "module": "ingestion",
+  "event": "ingest_completed",
+  "file_id": "abc123",
+  "filename": "report.pdf",
+  "duration_ms": 4200,
+  "chunks": 18
+}
+```
+
+**日志输出目标：**
+
+- 控制台（stderr）：INFO 及以上（开发/调试时可切换到 DEBUG）
+- 日志文件：`{STORAGE_PATH}/logs/pb.log`，按日滚动（`TimedRotatingFileHandler`，保留 7 天）
+
+### 11.2 性能指标（utils/metrics.py）
+
+轻量级内存指标收集，使用 `collections.deque` 保存最近 N 条记录（无外部依赖）。
+
+**收集的指标：**
+
+| 指标 | 说明 |
+| ---- | ---- |
+| `ingest_count` | 累计入库文件数（按结果：success / skip / fail） |
+| `ingest_duration_ms` | 最近 100 次入库耗时（用于计算 P50/P95） |
+| `search_count` | 累计搜索次数（按类型：hybrid / semantic / keyword / notes） |
+| `search_duration_ms` | 最近 100 次搜索耗时 |
+| `api_call_count` | LLM/Embedding/Rerank API 调用次数（按结果：success / retry / fail） |
+| `vec_items_total` | 向量索引条目总数（启动时读取，每次写入后更新） |
+
+**访问方式：**
+
+- `metrics.get_summary()` 返回当前指标快照（JSON），供 `get_stats` 和 `health_check` 调用
+
+### 11.3 健康检查（MCP `health_check` 工具）
+
+`health_check` 工具返回各组件状态，帮助客户端快速诊断系统是否正常。
+
+**返回值结构：**
+
+```json
+{
+  "status": "ok",
+  "components": {
+    "database": { "status": "ok", "size_mb": 45.2 },
+    "vec_index": { "status": "ok", "vec_impl": "aux_column", "count": 3821 },
+    "storage": { "status": "ok", "path": "/data/pb", "free_gb": 120.5 },
+    "dashscope_api": { "status": "ok", "last_success": "2026-03-06T11:58:00Z" }
+  },
+  "metrics": {
+    "ingest_success_rate": 0.98,
+    "search_p95_ms": 320,
+    "api_fail_rate": 0.01
+  }
+}
+```
+
+**组件状态规则：**
+
+- `"ok"`：正常
+- `"degraded"`：可用但有问题（如磁盘剩余 < 5GB、API 失败率 > 5%）
+- `"error"`：不可用（如数据库无法打开、存储路径不存在）
+- 顶层 `status` 取所有组件中最差的状态
+
+**SSE 模式额外支持：**
+
+SSE 传输模式下额外暴露 HTTP 端点 `GET /health`，返回与 `health_check` 工具相同的 JSON，供外部监控系统（如 UptimeRobot）轮询使用。
