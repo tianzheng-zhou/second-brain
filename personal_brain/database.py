@@ -581,6 +581,28 @@ def get_file_entry(file_id: str) -> list[str]:
     return [r[0] for r in rows]
 
 
+def get_file_summaries(file_ids: list[str]) -> dict[str, str]:
+    """Batch-fetch auto_enrichment summary text for given file IDs.
+    Returns {file_id: summary_text}. Files without a summary are omitted.
+    """
+    if not file_ids:
+        return {}
+    conn = _get_conn()
+    placeholders = ",".join("?" * len(file_ids))
+    rows = conn.execute(
+        f"""
+        SELECT ef.file_id, e.content_text
+        FROM entry_files ef
+        JOIN entries e ON ef.entry_id = e.id
+        WHERE ef.file_id IN ({placeholders})
+          AND e.source = 'auto_enrichment'
+          AND e.status = 'active'
+        """,
+        file_ids,
+    ).fetchall()
+    return {r[0]: r[1] for r in rows}
+
+
 # ---------------------------------------------------------------------------
 # Search operations
 # ---------------------------------------------------------------------------

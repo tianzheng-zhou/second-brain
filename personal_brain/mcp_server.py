@@ -241,18 +241,42 @@ def list_files_tool(
     type: Optional[str] = None,
     status: Optional[str] = None,
     enrichment_status: Optional[str] = None,
+    include_summary: bool = False,
     limit: int = 20,
     offset: int = 0,
 ) -> str:
-    """List files with optional filters and pagination."""
+    """
+    List files with optional filters and pagination.
+
+    Args:
+        type: Filter by file type ('text', 'pdf', 'image', 'audio', etc.).
+        status: Filter by status ('active' or 'archived').
+        enrichment_status: Filter by enrichment status ('pending', 'completed', 'failed').
+        include_summary: If True, attach the auto-generated summary to each file.
+            Use this to quickly scan what each file is about before deciding which
+            to read in detail with read_document(file_id).
+        limit: Max files to return (default 20).
+        offset: Pagination offset.
+
+    Workflow tip: When search yields no results, enumerate files with
+    include_summary=True, skim summaries, then call read_document(file_id)
+    on the most relevant ones.
+    """
     try:
         files, total = db.list_files(
             type=type, status=status,
             enrichment_status=enrichment_status,
             limit=limit, offset=offset,
         )
+        file_dicts = [f.model_dump() for f in files]
+
+        if include_summary and files:
+            summaries = db.get_file_summaries([f.id for f in files])
+            for fd in file_dicts:
+                fd["summary"] = summaries.get(fd["id"])
+
         return _ok({
-            "files": [f.model_dump() for f in files],
+            "files": file_dicts,
             "total_count": total,
         })
     except Exception as e:
