@@ -399,6 +399,37 @@ def get_chunks_for_file(file_id: str) -> list[dict]:
     ]
 
 
+def get_adjacent_chunks(chunk_id: str, window: int = 1) -> list[dict]:
+    """Get chunks adjacent to the given chunk_id within the same file."""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT file_id, chunk_index FROM file_chunks WHERE id = ?", (chunk_id,)
+    ).fetchone()
+    if not row:
+        return []
+    file_id, idx = row[0], row[1]
+    rows = conn.execute(
+        """
+        SELECT id, chunk_index, content, start_char, page_number
+        FROM file_chunks
+        WHERE file_id = ? AND chunk_index BETWEEN ? AND ?
+        ORDER BY chunk_index
+        """,
+        (file_id, idx - window, idx + window),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "chunk_index": r[1],
+            "content": r[2],
+            "start_char": r[3],
+            "page_number": r[4],
+            "is_current": r[1] == idx,
+        }
+        for r in rows
+    ]
+
+
 def delete_chunks_for_file(file_id: str) -> None:
     conn = _get_conn()
     vec_impl = config_manager.get("vec_impl")

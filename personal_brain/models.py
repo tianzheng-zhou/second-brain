@@ -50,6 +50,9 @@ class SearchResult(BaseModel):
     chunk_index: Optional[int] = None
     page_number: Optional[int] = None
     entry_id: Optional[str] = None
+    created_at: Optional[datetime] = None  # upload time (file/entry)
+    event_time_start: Optional[datetime] = None  # event time range start (entries only)
+    event_time_end: Optional[datetime] = None    # event time range end (entries only)
 
 
 class TaskInfo(BaseModel):

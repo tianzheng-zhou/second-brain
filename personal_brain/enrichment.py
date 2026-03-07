@@ -31,6 +31,25 @@ _TAG_PROMPT = (
     "摘要：\n{summary}"
 )
 
+_EVENT_TIME_PROMPT = (
+    "请分析以下文档摘要，提取文档内容所描述的事件或内容发生的时间范围。\n"
+    "注意：提取的是内容涉及的时间，而非文档的创建/上传时间。\n\n"
+    "规则：\n"
+    "1. 如果时间明确，使用精确日期（YYYY-MM-DD）\n"
+    "2. 如果时间模糊（如「年初」、「大约」、「某年夏天」），给出合理范围\n"
+    "3. 如果完全无法确定，返回 null\n"
+    "4. 只输出 JSON 对象或 null，不要其他文字：\n"
+    "   {{\"raw\": \"原始时间描述\", \"start\": \"YYYY-MM-DD\", \"end\": \"YYYY-MM-DD\", "
+    "\"precision\": \"day|month|quarter|year|fuzzy\"}}\n\n"
+    "示例：\n"
+    "- 内容发生在2024年3月15日 → {{\"raw\": \"2024年3月15日\", \"start\": \"2024-03-15\", \"end\": \"2024-03-15\", \"precision\": \"day\"}}\n"
+    "- 内容描述2023年全年 → {{\"raw\": \"2023年\", \"start\": \"2023-01-01\", \"end\": \"2023-12-31\", \"precision\": \"year\"}}\n"
+    "- 内容描述2024年上半年 → {{\"raw\": \"2024年上半年\", \"start\": \"2024-01-01\", \"end\": \"2024-06-30\", \"precision\": \"quarter\"}}\n"
+    "- 内容描述「大约2022年底」 → {{\"raw\": \"大约2022年底\", \"start\": \"2022-09-01\", \"end\": \"2023-03-31\", \"precision\": \"fuzzy\"}}\n"
+    "- 时间完全不确定 → null\n\n"
+    "文档摘要：\n{summary}"
+)
+
 # Token estimation constants
 _CJK_CHARS_PER_TOKEN = 1.2
 _OTHER_CHARS_PER_TOKEN = 0.35
@@ -71,6 +90,24 @@ def _build_content_for_summary(text: str, chunks: list[FileChunk]) -> str:
     return "\n\n...\n\n".join(c.content for c in selected)
 
 
+def _extract_event_time(summary: str, model: str) -> dict | None:
+    """Extract event time from document summary using LLM. Returns dict or None."""
+    prompt = _EVENT_TIME_PROMPT.format(summary=summary)
+    try:
+        response = call_llm(model, [{"role": "user", "content": prompt}], temperature=0)
+        response = response.strip()
+        if not response or response.lower() == "null":
+            return None
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        if match:
+            data = json.loads(match.group())
+            if data.get("start") and data.get("end"):
+                return data
+    except Exception as e:
+        logger.warning("Event time extraction failed", extra={"error": str(e)})
+    return None
+
+
 def enrich_file(
     file_obj: FileInfo,
     text: str,
@@ -100,6 +137,10 @@ def enrich_file(
         tag_response = call_llm(model, [{"role": "user", "content": tag_prompt}], temperature=0)
         tags = _parse_tags(tag_response)
 
+        # Extract event time from document content
+        event_time = _extract_event_time(summary, model)
+        metadata = {"event_time": event_time} if event_time else None
+
         # Generate embedding for the entry
         embedding = generate_embedding(summary)
 
@@ -107,7 +148,7 @@ def enrich_file(
         entry = Entry(
             id=str(uuid.uuid4()),
             content_text=summary,
-            metadata=None,
+            metadata=metadata,
             created_at=datetime.utcnow(),
             source="auto_enrichment",
             tags=tags,

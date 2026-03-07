@@ -323,14 +323,13 @@ def _semantic_chunks(
                 )
         except Exception as e:
             logger.error(
-                "Semantic split LLM call failed, falling back to simple chunking",
-                extra={"model": model, "error": str(e)},
+                "Semantic split LLM call failed",
+                extra={"model": model, "batch_start": batch_start_idx, "error": str(e)},
             )
-            # If LLM fails, we just continue to next batch (or could fallback entire file)
-            # Here we choose to continue, effectively merging this batch into one big chunk 
-            # (which will be caught by hard split later) or just skipping split points.
-            # A safer fallback might be to add simple split points for this batch.
-            pass
+            raise RuntimeError(
+                f"Semantic chunking failed: LLM call error for batch starting at segment {batch_start_idx}. "
+                f"Model: {model}, Error: {e}"
+            ) from e
             
     split_points = sorted(set(split_points))
     split_points.append(len(segments))

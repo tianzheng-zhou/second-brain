@@ -63,13 +63,34 @@ def search(
     limit: int = 5,
     time_range: Optional[str] = None,
     use_rerank: bool = False,
+    expand_query: bool = False,
 ) -> str:
     """
-    Hybrid search (vector + FTS5 RRF). Returns chunks and entries with source info.
-    time_range: natural language (e.g. '最近一周', 'last 7 days', '2024年1月到3月')
+    Hybrid search combining vector similarity and FTS5 keyword matching (RRF fusion).
+    This is the recommended default search method for most queries.
+
+    Args:
+        query: Natural language search query — questions, keywords, or topic descriptions.
+        limit: Max results (default 5).
+        time_range: Natural language time filter on file upload time.
+            Examples: '最近一周', 'last 7 days', '2024年1月到3月'.
+        use_rerank: Apply LLM reranking for higher precision. Recommended when
+            top-k quality matters. Adds ~1-2s latency.
+        expand_query: Use LLM to rewrite the query for better recall.
+            Recommended for conversational/vague queries (e.g. '那个关于XXX的文章').
+
+    Returns: JSON array of search results with score, content, source info, and created_at.
+
+    Best practices:
+    - For precise keyword lookups → use search_keyword_tool.
+    - For conceptual/fuzzy queries → use search_semantic_tool.
+    - For vague/oral queries → set expand_query=True.
+    - For important queries needing high precision → set use_rerank=True.
+    - After finding relevant chunks → use get_adjacent_chunks to expand context.
+    - After finding relevant files → use read_document with file_id for deep reading.
     """
     try:
-        results = search_hybrid(query, limit, time_range, use_rerank)
+        results = search_hybrid(query, limit, time_range, use_rerank, expand_query)
         return _ok([r.model_dump() for r in results])
     except Exception as e:
         logger.error("search failed", extra={"error": str(e)})
@@ -82,7 +103,11 @@ def search_semantic_tool(
     limit: int = 5,
     time_range: Optional[str] = None,
 ) -> str:
-    """Pure vector semantic search. Good for fuzzy/conceptual queries."""
+    """
+    Pure vector semantic search — best for conceptual/fuzzy queries where exact
+    keywords may not appear in the document (e.g. 'machine learning optimization techniques').
+    Use the default 'search' tool if unsure which search mode to use.
+    """
     try:
         results = search_semantic(query, limit, time_range)
         return _ok([r.model_dump() for r in results])
@@ -96,7 +121,11 @@ def search_keyword_tool(
     limit: int = 5,
     time_range: Optional[str] = None,
 ) -> str:
-    """FTS5 keyword search (exact term matching, chunks only)."""
+    """
+    FTS5 keyword search — best for exact term matching (e.g. function names,
+    error codes, specific phrases). Chunks only, no entries.
+    Use the default 'search' tool if unsure which search mode to use.
+    """
     try:
         results = search_keyword(query, limit, time_range)
         return _ok([r.model_dump() for r in results])
@@ -110,7 +139,11 @@ def search_notes_tool(
     limit: int = 5,
     tag: Optional[str] = None,
 ) -> str:
-    """Vector search for notes/entries only. Optionally filter by tag."""
+    """
+    Vector search limited to notes/entries only (excludes file chunks).
+    Use when searching user-written notes or auto-generated summaries.
+    Optionally filter by tag.
+    """
     try:
         results = search_notes(query, limit, tag)
         return _ok([r.model_dump() for r in results])
@@ -161,6 +194,28 @@ def read_document(file_id: str, query: Optional[str] = None) -> str:
         "mode": "full",
         "content": text,
     })
+
+
+@mcp.tool()
+def get_adjacent_chunks(chunk_id: str, window: int = 1) -> str:
+    """
+    Get chunks adjacent to a specific chunk for expanded context.
+    Use after search to read surrounding content of a relevant chunk.
+
+    Args:
+        chunk_id: The chunk ID from a search result (format: '{file_id}_{chunk_index}').
+        window: Number of chunks before and after to include (default 1).
+
+    Returns: JSON array of chunks ordered by chunk_index, with is_current=true
+        marking the requested chunk.
+    """
+    try:
+        chunks = db.get_adjacent_chunks(chunk_id, window)
+        if not chunks:
+            return _ok(_err(f"Chunk {chunk_id} not found"))
+        return _ok(chunks)
+    except Exception as e:
+        return _ok(_err(str(e)))
 
 
 @mcp.tool()
