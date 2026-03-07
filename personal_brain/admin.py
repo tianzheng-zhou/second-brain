@@ -211,6 +211,45 @@ with tab_manage:
                     if fobj:
                         st.json(fobj.model_dump(mode="json"))
 
+                st.divider()
+                st.subheader("Chunk Details")
+                chunks = db.get_chunks_for_file(selected_id)
+                if chunks:
+                    import pandas as pd
+                    missing_vec = sum(1 for c in chunks if not c["has_vector"])
+                    col_m1, col_m2, col_m3 = st.columns(3)
+                    col_m1.metric("Chunks", len(chunks))
+                    col_m2.metric("Missing Vector", missing_vec)
+                    avg_chars = sum(c["char_count"] for c in chunks) // len(chunks)
+                    col_m3.metric("Avg Chars / Chunk", avg_chars)
+
+                    df_chunks = pd.DataFrame([
+                        {
+                            "Index": c["chunk_index"],
+                            "Chars": c["char_count"],
+                            "Page": c["page_number"] or "-",
+                            "Has Vector": "✓" if c["has_vector"] else "✗",
+                            "ID": c["id"],
+                        }
+                        for c in chunks
+                    ])
+                    st.dataframe(df_chunks, use_container_width=True)
+
+                    selected_chunk_idx = st.selectbox(
+                        "View chunk content",
+                        options=[c["chunk_index"] for c in chunks],
+                        format_func=lambda i: f"Chunk {i} ({chunks[i]['char_count']} chars, page {chunks[i]['page_number'] or '-'})",
+                    )
+                    if selected_chunk_idx is not None:
+                        chunk = chunks[selected_chunk_idx]
+                        st.text_area(
+                            f"Chunk {chunk['chunk_index']} content",
+                            value=chunk["content"],
+                            height=300,
+                        )
+                else:
+                    st.info("No chunks found for this file.")
+
                 if st.session_state.get(f"del_confirm_{selected_id}"):
                     st.warning("Confirm deletion?")
                     if st.button("Yes, Delete", key=f"yes_del_{selected_id}"):

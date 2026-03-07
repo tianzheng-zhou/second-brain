@@ -60,6 +60,9 @@ def call_llm(
     extra_body: dict[str, Any] = {}
     if _is_thinking_model(model):
         extra_body["enable_thinking"] = False
+        # DashScope Qwen3: temperature must be > 0 when thinking is disabled
+        if temperature == 0:
+            temperature = 0.01
 
     try:
         resp = _get_client().chat.completions.create(

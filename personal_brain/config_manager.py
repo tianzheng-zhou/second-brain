@@ -19,10 +19,10 @@ _DEFAULTS: dict[str, Any] = {
     "vision_model": "kimi-k2.5",
     "enrichment_model": "kimi-k2.5",
     "embedding_batch_size": 6,
-    "use_semantic_split": False,
+    "use_semantic_split": True,
     "semantic_split_model": "qwen3.5-flash",
     "chunk_size": 1500,
-    "chunk_overlap": 200,
+    "chunk_overlap": 0,
     "vec_impl": "aux_column",
 }
 

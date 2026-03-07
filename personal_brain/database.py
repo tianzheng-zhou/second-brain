@@ -372,6 +372,33 @@ def save_chunks(chunks: list[FileChunk], embeddings: list[list[float]]) -> None:
             )
 
 
+def get_chunks_for_file(file_id: str) -> list[dict]:
+    """Return chunk details for a file, including whether a vector exists."""
+    conn = _get_conn()
+    rows = conn.execute(
+        """
+        SELECT fc.id, fc.chunk_index, fc.content, fc.start_char, fc.page_number,
+               EXISTS(SELECT 1 FROM fts_chunks ft WHERE ft.chunk_id = fc.id) AS has_vector
+        FROM file_chunks fc
+        WHERE fc.file_id = ?
+        ORDER BY fc.chunk_index
+        """,
+        (file_id,),
+    ).fetchall()
+    return [
+        {
+            "id": r[0],
+            "chunk_index": r[1],
+            "content": r[2],
+            "start_char": r[3],
+            "page_number": r[4],
+            "char_count": len(r[2]) if r[2] else 0,
+            "has_vector": bool(r[5]),
+        }
+        for r in rows
+    ]
+
+
 def delete_chunks_for_file(file_id: str) -> None:
     conn = _get_conn()
     vec_impl = config_manager.get("vec_impl")

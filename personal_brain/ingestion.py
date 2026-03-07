@@ -53,14 +53,17 @@ def process_file(file_path: Path) -> dict:
     existing = db.get_file(file_id)
     if existing:
         if existing.status == "active":
-            logger.info("File already active, skipping", extra={"file_id": file_id})
-            metrics.increment("ingest_count", "skip")
-            return {"file_id": file_id, "status": "skip", "message": "Already exists (active)"}
+            logger.info("File already active, refreshing index", extra={"file_id": file_id})
+            # Force refresh index even if active
+            refresh_index_for_file(file_id)
+            metrics.increment("ingest_count", "refresh")
+            return {"file_id": file_id, "status": "refreshed", "message": "Already exists, index refreshed"}
         elif existing.status == "archived":
             db.restore_file(file_id)
-            logger.info("File re-activated from archived", extra={"file_id": file_id})
-            metrics.increment("ingest_count", "skip")
-            return {"file_id": file_id, "status": "restored", "message": "Re-activated from archived"}
+            logger.info("File re-activated from archived, refreshing index", extra={"file_id": file_id})
+            refresh_index_for_file(file_id)
+            metrics.increment("ingest_count", "refresh")
+            return {"file_id": file_id, "status": "restored", "message": "Re-activated and refreshed"}
 
     # Step 3: Organize file (copy to STORAGE_PATH)
     dest_path = organize_file(file_path, STORAGE_PATH)
@@ -185,7 +188,6 @@ def process_directory(dir_path: Path) -> dict:
 def refresh_index_for_file(file_id: str) -> dict:
     """
     Rebuild chunks, embeddings, and enrichment for a single file.
-    Fully transactional: failure rolls back to original state.
     """
     file_obj = db.get_file(file_id)
     if not file_obj:
@@ -198,7 +200,7 @@ def refresh_index_for_file(file_id: str) -> dict:
     tmp_path = processed_dir / f"{file_id}.md.tmp"
     processed_dir.mkdir(parents=True, exist_ok=True)
 
-    # Step 2: Re-extract text to tmp path
+    # Re-extract text to tmp path first (fail fast before touching DB)
     try:
         text, image_root = extract_text(file_path, file_type)
         if text and file_type in ("pdf", "image", "audio"):
@@ -208,10 +210,8 @@ def refresh_index_for_file(file_id: str) -> dict:
             tmp_path.unlink()
         raise RuntimeError(f"Text extraction failed during refresh: {e}") from e
 
-    conn = db._get_conn()
+    chunks: list[FileChunk] = []
     try:
-        conn.execute(f"SAVEPOINT refresh_{file_id}")
-
         # Delete old chunks (cascades vectors + fts)
         db.delete_chunks_for_file(file_id)
 
@@ -224,8 +224,6 @@ def refresh_index_for_file(file_id: str) -> dict:
                     db.delete_entry(entry_id)
 
         # Rebuild chunks
-        chunks: list[FileChunk] = []
-        embeddings: list[list[float]] = []
         if text:
             chunks = generate_embedding_chunks(text, file_id, file_type, image_root)
             embeddings = embed_chunks(chunks)
@@ -238,16 +236,13 @@ def refresh_index_for_file(file_id: str) -> dict:
             db.update_file_enrichment_status(file_id, "failed")
             logger.warning("Enrichment failed during refresh", extra={"file_id": file_id, "error": str(e)})
 
-        conn.execute(f"RELEASE SAVEPOINT refresh_{file_id}")
-
     except Exception as e:
-        conn.execute(f"ROLLBACK TO SAVEPOINT refresh_{file_id}")
         if tmp_path.exists():
             tmp_path.unlink()
-        logger.error("Refresh rollback", extra={"file_id": file_id, "error": str(e)})
-        raise RuntimeError(f"refresh_index failed, rolled back: {e}") from e
+        logger.error("Refresh failed", extra={"file_id": file_id, "error": str(e)})
+        raise RuntimeError(f"refresh_index failed: {e}") from e
 
-    # Atomic rename
+    # Atomic rename of processed text
     final_path = processed_dir / f"{file_id}.md"
     if tmp_path.exists():
         try:
